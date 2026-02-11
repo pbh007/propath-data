@@ -1,0 +1,13 @@
+id,name,region,pathway_summary,qschool_signup_url,official_site_url
+pga,PGA TOUR,North America,Top global tour; access via Q-School Finals + Korn Ferry graduation,https://qualifying.pgatour.com,https://www.pgatour.com
+korn-ferry,Korn Ferry Tour,North America,PGA feeder; 30 cards awarded each season,https://qualifying.pgatour.com,https://www.pgatour.com/korn-ferry-tour
+dp,DP World Tour,Europe & Global,Global tour; access via Q-School + Challenge Tour rankings,https://www.europeantour.com/qualifying-school/,https://www.europeantour.com
+hotel-planner,HotelPlanner Tour,Europe,Feeder to DP; Top 20 earn cards,https://www.europeantour.com/challengetour/qualifying/,https://www.europeantour.com/challengetour
+asian,Asian Tour,Asia,International events; Q-School each Jan/Feb,https://www.asiantour.com/qualifying,https://www.asiantour.com
+japan,Japan Golf Tour (JGTO),Japan,Major independent circuit; JGTO Q-School,https://www.jgto.org/pc/TourTopicsDetail.do?newsId=24148,https://www.jgto.org
+kpga,KPGA Tour,Korea,Strong domestic tour; KPGA Q-School annually,https://www.kpga.co.kr/page/QualifyingInfo,https://www.kpga.co.kr
+china,China Tour,China,OWGR-recognized; CGA Q-School in March,https://www.cgachina.com.cn/qualifying,https://www.cgachina.com.cn
+americas,PGA TOUR Americas,North & South America,Feeds Korn Ferry Tour via Fortinet Cup standings,https://www.pgatouramericas.com/qualifying,https://www.pgatouramericas.com
+sunshine,Sunshine Tour,Africa (South Africa),Aligned with DP; Q-School held in Dec,https://www.sunshinetour.com/qualifying-school/,https://www.sunshinetour.com
+australasia,PGA Tour of Australasia,Australasia,Feeds DP/Asia; Q-School held Oct/Nov,https://pga.org.au/qualifying-school/,https://pga.org.au
+pgti,PGTI (India) Tour,India,Domestic circuit; Q-School held annually in Dec,https://www.pgtofindia.com/qualifying-school/,https://www.pgtofindia.com
