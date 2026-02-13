@@ -1,0 +1,16 @@
+{
+  "name": "propath-data",
+  "version": "1.0.0",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "scrape": "tsx scrapers/run-all.ts"
+  },
+  "dependencies": {
+    "node-fetch": "^3.3.2",
+    "cheerio": "^1.0.0"
+  },
+  "devDependencies": {
+    "tsx": "^4.20.6"
+  }
+}
