@@ -1,0 +1,10 @@
+[
+  {
+    "id": "pga_tour",
+    "name": "PGA TOUR",
+    "connector": "json_api",
+    "url": "PASTE_URL_HERE_LATER",
+    "output": "ProPathEvents2026-MasterEvents.csv",
+    "defaults": { "tour": "PGA TOUR", "gender": "Men", "type": "Tour", "stage": "Season" }
+  }
+]
