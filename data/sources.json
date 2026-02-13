@@ -6,5 +6,13 @@
     "url": "PASTE_URL_HERE_LATER",
     "output": "ProPathEvents2026-MasterEvents.csv",
     "defaults": { "tour": "PGA TOUR", "gender": "Men", "type": "Tour", "stage": "Season" }
+  },
+  {
+    "id": "mlgt_upcoming",
+    "name": "Minor League Golf Tour - Upcoming Events",
+    "connector": "html_blocks",
+    "url": "https://www.minorleaguegolf.com/index_events.asp",
+    "output": "ProPathEvents-MiniTour.csv",
+    "defaults": { "tour": "Minor League Golf Tour", "gender": "Men" }
   }
 ]
