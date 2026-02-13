@@ -1,25 +1,19 @@
 {
   "name": "propath-data",
   "version": "1.0.0",
-  "private": true,
   "type": "module",
-
+  "private": true,
   "scripts": {
     "build:scrapers": "tsc -p tsconfig.scrapers.json",
-    "scrape": "node dist-scrapers/run-all.js",
-    "scrape:dev": "tsx scrapers/run-all.ts"
+    "scrape": "node dist-scrapers/run-all.js"
   },
-
   "dependencies": {
     "cheerio": "^1.0.0",
     "node-fetch": "^3.3.2"
   },
-
   "devDependencies": {
-  "@types/node": "^22.0.0",
-  "tsx": "^4.20.6",
-  "typescript": "^5.4.0"
-}
-
+    "@types/node": "^22.0.0",
+    "tsx": "^4.20.6",
+    "typescript": "^5.9.3"
   }
 }
