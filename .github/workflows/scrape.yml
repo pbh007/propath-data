@@ -26,6 +26,18 @@ jobs:
       - name: Install dependencies
         run: npm install
 
+      - name: Build scrapers
+        run: npm run build:scrapers
+
+      - name: Debug build output
+        run: |
+          echo "=== ROOT ==="
+          ls -la
+          echo "=== dist-scrapers ==="
+          ls -la dist-scrapers || true
+          echo "=== dist-scrapers (recursive) ==="
+          find dist-scrapers -maxdepth 3 -type f || true
+
       - name: Run scraper
         run: npm run scrape
 
@@ -33,9 +45,7 @@ jobs:
         run: |
           git config user.name "propath-bot"
           git config user.email "bot@propath.app"
-
           git add data/*.csv
-
           if git diff --staged --quiet; then
             echo "No changes detected."
           else
