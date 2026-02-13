@@ -5,9 +5,6 @@ import { runJsonApi } from "./connectors/json_api.js";
 import { runHtmlTable } from "./connectors/html_table.js";
 import { runHtmlBlocks } from "./connectors/html_blocks.js";
 
-
-
-
 type Source = {
   id: string;
   name: string;
@@ -18,29 +15,55 @@ type Source = {
   tableSelector?: string;
 };
 
-async function runSource(s: Source) {
+function isValidUrl(url?: string) {
+  if (!url) return false;
+  if (url.includes("PASTE_URL_HERE")) return false;
+
+  try {
+    new URL(url);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function runSource(s: Source): Promise<boolean> {
   console.log(`\n=== ${s.name} (${s.connector}) ===`);
 
-  let events = [];
-
-  if (s.connector === "json_api") {
-    events = await runJsonApi(s);
-  } else if (s.connector === "html_table") {
-    events = await runHtmlTable(s);
-  } else if (s.connector === "html_blocks") {
-    events = await runHtmlBlocks(s);
-  } else {
-    throw new Error(`Unknown connector: ${s.connector}`);
+  // Skip invalid URLs
+  if (!isValidUrl(s.url)) {
+    console.log(`⚠ Skipping ${s.name}: invalid or placeholder URL.`);
+    return false;
   }
 
-  // Safety guard: prevents silent failure
-  if (!events || !events.length) {
-    throw new Error(`${s.id}: 0 events returned (likely parsing broke)`);
+  try {
+    let events = [];
+
+    if (s.connector === "json_api") {
+      events = await runJsonApi(s);
+    } else if (s.connector === "html_table") {
+      events = await runHtmlTable(s);
+    } else if (s.connector === "html_blocks") {
+      events = await runHtmlBlocks(s);
+    } else {
+      console.log(`⚠ Unknown connector for ${s.name}, skipping.`);
+      return false;
+    }
+
+    if (!events || !events.length) {
+      console.log(`⚠ ${s.name}: 0 events returned. Skipping write.`);
+      return false;
+    }
+
+    writeEventsCsv(s.output, events);
+    console.log(`✓ ${s.name}: ${events.length} events written.`);
+    return true;
+
+  } catch (err) {
+    console.error(`✖ ${s.name} failed:`);
+    console.error(err);
+    return false;
   }
-
-  writeEventsCsv(s.output, events);
-
-  console.log(`✓ ${s.name}: ${events.length} events written.`);
 }
 
 async function main() {
@@ -58,11 +81,18 @@ async function main() {
     throw new Error("sources.json is empty or invalid.");
   }
 
+  let successCount = 0;
+
   for (const s of sources) {
-    await runSource(s);
+    const ok = await runSource(s);
+    if (ok) successCount++;
   }
 
-  console.log("\nAll sources complete.");
+  if (successCount === 0) {
+    throw new Error("All sources failed.");
+  }
+
+  console.log(`\nComplete. ${successCount}/${sources.length} sources succeeded.`);
 }
 
 main().catch((err) => {
