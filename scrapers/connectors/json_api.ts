@@ -1,8 +1,5 @@
-import type { ProPathEvent } from "../lib/types";
-import { coerceISO } from "../lib/normalize";
-
-
-
+import type { ProPathEvent } from "../lib/types.js";
+import { coerceISO } from "../lib/normalize.js";
 
 type Source = {
   url: string;
@@ -14,7 +11,6 @@ export async function runJsonApi(source: Source): Promise<ProPathEvent[]> {
   if (!res.ok) throw new Error(`json_api fetch failed: ${res.status} ${res.statusText}`);
   const data = await res.json();
 
-  // NOTE: This part changes per API shape. For now we assume data.events exists.
   const rawEvents = Array.isArray((data as any).events) ? (data as any).events : [];
 
   return rawEvents.map((e: any, idx: number) => ({
