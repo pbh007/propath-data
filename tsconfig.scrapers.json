@@ -4,7 +4,7 @@
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
 
-    "rootDir": ".",
+    "rootDir": "scrapers",
     "outDir": "dist-scrapers",
 
     "strict": true,
