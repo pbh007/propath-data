@@ -1,5 +1,6 @@
-import type { ProPathEvent } from "../lib/types.js";
-import { coerceISO } from "../lib/normalize.js";
+import type { ProPathEvent } from "../lib/types";
+import { coerceISO } from "../lib/normalize";
+
 
 type Source = {
   url: string;
