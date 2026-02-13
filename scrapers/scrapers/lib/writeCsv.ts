@@ -1,6 +1,7 @@
 import fs from "fs";
 import path from "path";
-import type { ProPathEvent } from "./types";
+import type { ProPathEvent } from "./types.js";
+
 
 const COLS: (keyof ProPathEvent)[] = [
   "id","tour","gender","type","stage","title","start","end","city","state_country",
