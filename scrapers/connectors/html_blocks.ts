@@ -12,10 +12,16 @@ type Source = {
 };
 
 function addDays(iso: string, days: number) {
-  const d = new Date(iso + "T00:00:00Z");
+  // Only accept YYYY-MM-DD
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(iso)) return iso;
+
+  const d = new Date(`${iso}T00:00:00Z`);
+  if (Number.isNaN(d.getTime())) return iso;
+
   d.setUTCDate(d.getUTCDate() + days);
   return d.toISOString().slice(0, 10);
 }
+
 
 function parseDayCount(text: string): number {
   // examples: "1-Day $275", "2-Day $540", "3-Day $0"
