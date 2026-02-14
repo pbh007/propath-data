@@ -7,20 +7,29 @@ import { runJsonApi } from "./connectors/json_api.js";
 import { runHtmlTable } from "./connectors/html_table.js";
 import { runHtmlBlocks } from "./connectors/html_blocks.js";
 
+type ProPathEvent = {
+  id?: string;
+  tour?: string;
+  gender?: string;
+  type?: string;
+  stage?: string;
+  title?: string;
+  start?: string | null;
+  end?: string | null;
+  city?: string;
+  state_country?: string;
+  tourUrl?: string;
+  signupUrl?: string;
+  mondayUrl?: string;
+  mondayDate?: string | null;
+};
+
 type Source = {
   id: string;
   name: string;
   connector: "json_api" | "html_table" | "html_blocks";
   url: string;
-
-  /**
-   * IMPORTANT:
-   * This should be a stable filename (same every run), e.g.
-   * "data/ProPath-MiniTour2026-MasterEvents.csv"
-   * or "data/ProPathEvents2026-MasterEvents.csv"
-   */
-  output: string;
-
+  output: string; // IMPORTANT: should be under data/
   defaults?: Record<string, string>;
   tableSelector?: string;
 };
@@ -28,7 +37,6 @@ type Source = {
 function isValidUrl(url?: string) {
   if (!url) return false;
   if (url.includes("PASTE_URL_HERE")) return false;
-
   try {
     new URL(url);
     return true;
@@ -37,84 +45,105 @@ function isValidUrl(url?: string) {
   }
 }
 
-/** Ensure every row has a stable id (needed for merge) */
-function ensureId(row: any, fallbackPrefix: string) {
-  const id = String(row?.id ?? "").trim();
-  if (id) return id;
+function safeRead(filePath: string): string {
+  if (!fs.existsSync(filePath)) return "";
+  return fs.readFileSync(filePath, "utf8");
+}
 
-  const parts = [
-    row?.tour ?? "",
-    row?.title ?? "",
-    row?.start ?? "",
-    row?.city ?? "",
-    row?.state_country ?? "",
-  ]
-    .map((x: any) => String(x || "").trim())
-    .filter(Boolean);
-
-  const combo = parts.join("|");
-  if (!combo) return `${fallbackPrefix}-${Math.random().toString(36).slice(2)}`;
-
-  // lightweight slug
-  const slug = combo
+function slug(s: string) {
+  return (s || "")
     .toLowerCase()
+    .replace(/&/g, "and")
     .replace(/[^a-z0-9]+/g, "-")
-    .replace(/(^-|-$)/g, "");
-
-  return `${fallbackPrefix}-${slug}`;
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 80);
 }
 
-function readExistingCsvRows(outPath: string): any[] {
-  try {
-    if (!fs.existsSync(outPath)) return [];
-    const csv = fs.readFileSync(outPath, "utf8");
-    const parsed = Papa.parse(csv, { header: true, skipEmptyLines: "greedy" });
-    const rows = (parsed.data as any[]).filter((r) => r && Object.keys(r).length);
-    return rows;
-  } catch {
-    return [];
-  }
+function makeStableId(e: ProPathEvent): string {
+  // stable enough: tour + start + title + city
+  return [
+    slug(e.tour || "unknown-tour"),
+    e.start || "tbd",
+    slug(e.title || "event"),
+    slug(e.city || ""),
+  ].filter(Boolean).join("-");
 }
 
-/**
- * Merge rule:
- * - keep everything already in the file (including past events)
- * - overwrite rows with same id using fresh scrape (updates)
- * - add brand new ids (new events)
- */
-function mergeById(existing: any[], fresh: any[]): any[] {
-  const map = new Map<string, any>();
+function normalizeRow(r: any): ProPathEvent {
+  const out: ProPathEvent = {
+    id: (r.id ?? "").toString().trim() || undefined,
+    tour: (r.tour ?? "").toString().trim() || undefined,
+    gender: (r.gender ?? "").toString().trim() || undefined,
+    type: (r.type ?? "").toString().trim() || undefined,
+    stage: (r.stage ?? "").toString().trim() || undefined,
+    title: (r.title ?? "").toString().trim() || undefined,
+    start: (r.start ?? "").toString().trim() || null,
+    end: (r.end ?? "").toString().trim() || null,
+    city: (r.city ?? "").toString().trim() || undefined,
+    state_country: (r.state_country ?? "").toString().trim() || undefined,
+    tourUrl: (r.tourUrl ?? "").toString().trim() || undefined,
+    signupUrl: (r.signupUrl ?? "").toString().trim() || undefined,
+    mondayUrl: (r.mondayUrl ?? "").toString().trim() || undefined,
+    mondayDate: (r.mondayDate ?? "").toString().trim() || null,
+  };
 
-  for (const r of existing) {
-    const id = String(r?.id ?? "").trim();
-    if (id) map.set(id, r);
+  if (!out.id) out.id = makeStableId(out);
+  return out;
+}
+
+function parseCsvToEvents(csvText: string): ProPathEvent[] {
+  if (!csvText.trim()) return [];
+  const parsed = Papa.parse(csvText, { header: true, skipEmptyLines: "greedy" });
+  if (parsed.errors?.length) {
+    console.log("CSV parse warnings:", parsed.errors.slice(0, 3));
   }
-  for (const r of fresh) {
-    const id = String(r?.id ?? "").trim();
-    if (id) map.set(id, r); // overwrite/update
+  const rows = (parsed.data as any[]).filter(Boolean);
+  return rows.map(normalizeRow);
+}
+
+function mergeById(existing: ProPathEvent[], incoming: ProPathEvent[]): ProPathEvent[] {
+  const map = new Map<string, ProPathEvent>();
+
+  // Existing first (preserve past events)
+  for (const e of existing) {
+    const id = e.id || makeStableId(e);
+    map.set(id, { ...e, id });
   }
 
-  return Array.from(map.values());
+  // Incoming overrides/updates by id
+  for (const e of incoming) {
+    const id = e.id || makeStableId(e);
+    const prev = map.get(id) || {};
+    map.set(id, { ...prev, ...e, id });
+  }
+
+  // Sort by start date (nulls at end)
+  const out = Array.from(map.values());
+  out.sort((a, b) => {
+    const as = a.start || "9999-12-31";
+    const bs = b.start || "9999-12-31";
+    return as.localeCompare(bs);
+  });
+  return out;
 }
 
 async function runSource(s: Source): Promise<boolean> {
   console.log(`\n=== ${s.name} (${s.connector}) ===`);
 
-  // Skip invalid URLs
   if (!isValidUrl(s.url)) {
     console.log(`⚠ Skipping ${s.name}: invalid or placeholder URL.`);
     return false;
   }
 
   try {
-    let events: any[] = [];
+    let events: ProPathEvent[] = [];
 
     if (s.connector === "json_api") {
-      events = await runJsonApi(s);
+      events = await runJsonApi(s as any);
     } else if (s.connector === "html_table") {
-      events = await runHtmlTable(s);
+      events = await runHtmlTable(s as any);
     } else if (s.connector === "html_blocks") {
-      events = await runHtmlBlocks(s);
+      events = await runHtmlBlocks(s as any);
     } else {
       console.log(`⚠ Unknown connector for ${s.name}, skipping.`);
       return false;
@@ -125,30 +154,55 @@ async function runSource(s: Source): Promise<boolean> {
       return false;
     }
 
-    // Normalize output path (most of your sources.json uses "data/<file>.csv")
-    const outPath = path.resolve(s.output);
+    // Ensure output is under data/
+    if (!s.output.startsWith("data/")) {
+      console.log(`⚠ ${s.name}: output MUST start with "data/". Currently: ${s.output}`);
+      return false;
+    }
 
-    // Ensure ids exist (critical for merge)
-    const fresh = events.map((r) => ({
-      ...r,
-      id: ensureId(r, s.id || "src"),
-    }));
-
-    // ✅ NEW BEHAVIOR: merge into existing file instead of overwriting
-    const existing = readExistingCsvRows(outPath);
-    const merged = mergeById(existing, fresh);
-
-    writeEventsCsv(s.output, merged);
-
-    console.log(
-      `✓ ${s.name}: scraped=${fresh.length}, existing=${existing.length}, written=${merged.length}`
-    );
+    writeEventsCsv(s.output, events as any);
+    console.log(`✓ ${s.name}: ${events.length} events written to ${s.output}.`);
     return true;
+
   } catch (err) {
     console.error(`✖ ${s.name} failed:`);
     console.error(err);
     return false;
   }
+}
+
+function mergeIncomingMiniTourMaster() {
+  const dataDir = path.resolve("data");
+  const masterPath = path.join(dataDir, "ProPath-MiniTour2026-MasterEvents.csv");
+
+  // Read existing master
+  const existingCsv = safeRead(masterPath);
+  const existing = parseCsvToEvents(existingCsv);
+
+  // Read all incoming staging files
+  const incomingFiles = fs.existsSync(dataDir)
+    ? fs.readdirSync(dataDir).filter((f) => f.startsWith("_incoming_") && f.endsWith(".csv"))
+    : [];
+
+  const incomingAll: ProPathEvent[] = [];
+  for (const f of incomingFiles) {
+    const p = path.join(dataDir, f);
+    const csv = safeRead(p);
+    const events = parseCsvToEvents(csv);
+    incomingAll.push(...events);
+  }
+
+  if (!incomingAll.length) {
+    console.log("⚠ No incoming mini-tour events found (data/_incoming_*.csv). Merge skipped.");
+    return;
+  }
+
+  const merged = mergeById(existing, incomingAll);
+
+  // Write merged back to master using your existing writer (keeps headers consistent)
+  writeEventsCsv("data/ProPath-MiniTour2026-MasterEvents.csv", merged as any);
+
+  console.log(`✓ MiniTour master updated: ${merged.length} total rows`);
 }
 
 async function main() {
@@ -174,6 +228,9 @@ async function main() {
   if (successCount === 0) {
     throw new Error("All sources failed.");
   }
+
+  // ✅ merge staging mini tour updates into the real master file your app reads
+  mergeIncomingMiniTourMaster();
 
   console.log(`\nComplete. ${successCount}/${sources.length} sources succeeded.`);
 }
