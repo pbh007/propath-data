@@ -91,8 +91,61 @@ export async function runHtmlBlocks(source: Source): Promise<ProPathEvent[]> {
 
     // Event title: usually the thing with "Classic" / "Contest" etc.
     // We can grab from the "Event Info" link if present (its anchor text is the title in your page)
-    const eventInfo = links.find((l) => /Event Info/i.test(l.text));
-    const title = eventInfo ? eventInfo.text : "";
+    // Find the "Event Info" link (we use it as an anchor to locate the row/block)
+const eventInfo = links.find((l) => /Event Info/i.test(l.text));
+
+// Title should NOT be the link text ("Event Info").
+// We need to pull a meaningful title from surrounding text.
+let title = "";
+
+// Heuristic 1: look for a likely event name line in the captured windowText.
+// (Usually NOT the city/state, NOT the fee line, NOT generic words.)
+const joinedClean = windowText
+  .map((t) => t.replace(/\s+/g, " ").trim())
+  .filter(Boolean);
+
+// remove obvious junk candidates
+const junk = (s: string) => {
+  const x = s.toLowerCase();
+  if (x === "event info") return true;
+  if (x === "register") return true;
+  if (/\d+\s*-\s*day\s*\$\s*[\d,]+/i.test(s)) return true;
+  if (/^[A-Za-z .'-]+,\s*[A-Z]{2}$/.test(s)) return true; // City, ST
+  if (x.includes("minor league golf tour")) return true;
+  if (x.includes("training division")) return true;
+  return false;
+};
+
+// prefer strings that look like real event names
+const looksLikeTitle = (s: string) => {
+  const x = s.toLowerCase();
+  return (
+    s.length >= 6 &&
+    !junk(s) &&
+    (
+      x.includes("classic") ||
+      x.includes("open") ||
+      x.includes("championship") ||
+      x.includes("shootout") ||
+      x.includes("invitational") ||
+      x.includes("series") ||
+      x.includes("qualifier") ||
+      x.includes("club") ||
+      x.includes("cup")
+    )
+  );
+};
+
+title =
+  joinedClean.find(looksLikeTitle) ||
+  joinedClean.find((s) => !junk(s) && s.length >= 6) ||
+  "";
+
+// Absolute fallback: if we *still* accidentally got "Event Info", blank it out.
+if (/^event info$/i.test(title)) title = "";
+
+// Only push if we have a usable title
+if (!title) continue;
 
     // Fee / days: usually contains "1-Day $275" etc
     const feeMatch = joined.match(/\d+\s*-\s*Day\s*\$\s*[\d,]+/i);
