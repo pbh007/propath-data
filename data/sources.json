@@ -1,11 +1,10 @@
 [
-  
   {
     "id": "mlgt_upcoming",
     "name": "Minor League Golf Tour - Upcoming Events",
     "connector": "html_blocks",
     "url": "https://www.minorleaguegolf.com/index_events.asp",
-    "output": "ProPathEvents-MiniTour.csv",
+    "output": "data/_incoming_mlgt_upcoming.csv",
     "defaults": { "tour": "Minor League Golf Tour", "gender": "Men" }
   }
 ]
