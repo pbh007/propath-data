@@ -1,3 +1,4 @@
+// scrapers/run-all.ts
 import fs from "fs";
 import path from "path";
 import Papa from "papaparse";
@@ -29,22 +30,24 @@ type Source = {
   name: string;
   connector: "json_api" | "html_table" | "html_blocks";
   url: string;
-  output: string;
+  output: string; // should be data/_incoming_<something>.csv
   defaults?: Record<string, string>;
   tableSelector?: string;
 };
 
-function isValidUrl(url?: string) {
-  if (!url) return false;
-  if (url.includes("PASTE_URL_HERE")) return false;
-  try {
-    new URL(url);
-    return true;
-  } catch {
-    return false;
-  }
-}
+/* ----------------------------
+   Config
+---------------------------- */
+const DATA_DIR = path.resolve("data");
+const MASTER_MINI = path.join(DATA_DIR, "ProPath-MiniTour2026-MasterEvents.csv");
 
+// Safety guard: if a scrape returns too few rows for a tour,
+// we assume it failed and DO NOT overwrite that tour’s upcoming block.
+const MIN_ROWS_TO_TRUST_PER_TOUR = 5;
+
+/* ----------------------------
+   Helpers
+---------------------------- */
 function safeRead(filePath: string): string {
   if (!fs.existsSync(filePath)) return "";
   return fs.readFileSync(filePath, "utf8");
@@ -62,7 +65,7 @@ function slug(s: string) {
 function makeStableId(e: ProPathEvent): string {
   return [
     slug(e.tour || "unknown-tour"),
-    e.start || "tbd",
+    (e.start || "tbd").slice(0, 10),
     slug(e.title || "event"),
     slug(e.city || ""),
   ]
@@ -113,58 +116,79 @@ function isUpcoming(start?: string | null): boolean {
   return s >= todayISO();
 }
 
-function replaceUpcomingByTour(masterRows: ProPathEvent[], incomingRows: ProPathEvent[]) {
-  const incomingByTour = new Map<string, ProPathEvent[]>();
-
-  for (const r of incomingRows) {
-    const tour = String(r.tour || "").trim();
-    if (!tour) continue;
-    if (!incomingByTour.has(tour)) incomingByTour.set(tour, []);
-    incomingByTour.get(tour)!.push(r);
-  }
-
-  if (incomingByTour.size === 0) return masterRows;
-
-  let out = masterRows;
-
-  for (const [tour, rows] of incomingByTour.entries()) {
-    if (!rows.length) continue;
-
-    // Remove UPCOMING rows for that tour
-    out = out.filter((m) => {
-      const sameTour = String(m.tour || "").trim() === tour;
-      if (!sameTour) return true;
-      return !isUpcoming(m.start);
-    });
-
-    // Add new upcoming rows
-    out = out.concat(rows);
-  }
-
-  return out;
+function keyTour(t?: string) {
+  return (t || "").trim().toLowerCase();
 }
 
 function dedupeAndSort(rows: ProPathEvent[]) {
   const map = new Map<string, ProPathEvent>();
 
   for (const r of rows) {
-    const id = r.id || makeStableId(r);
+    const id = (r.id || makeStableId(r)).trim();
     map.set(id, { ...r, id });
   }
 
   const out = Array.from(map.values());
 
   out.sort((a, b) => {
-    const as = a.start || "9999-12-31";
-    const bs = b.start || "9999-12-31";
+    const as = (a.start || "9999-12-31").slice(0, 10);
+    const bs = (b.start || "9999-12-31").slice(0, 10);
     return as.localeCompare(bs);
   });
 
   return out;
 }
 
+/**
+ * Replace UPCOMING rows for each tour found in incoming.
+ * - Keeps PAST rows for that tour.
+ * - Leaves all other tours untouched.
+ * - Safety: only overwrites a tour if incoming has >= MIN_ROWS_TO_TRUST_PER_TOUR rows.
+ */
+function mergeMasterWithIncoming(master: ProPathEvent[], incoming: ProPathEvent[]) {
+  const incomingByTour = new Map<string, ProPathEvent[]>();
+
+  for (const r of incoming) {
+    const tourKey = keyTour(r.tour);
+    if (!tourKey) continue;
+    if (!incomingByTour.has(tourKey)) incomingByTour.set(tourKey, []);
+    incomingByTour.get(tourKey)!.push(r);
+  }
+
+  if (incomingByTour.size === 0) return master;
+
+  let out = [...master];
+
+  for (const [tourKey, rows] of incomingByTour.entries()) {
+    const count = rows.length;
+
+    // Safety: skip if looks like a failed scrape
+    if (count < MIN_ROWS_TO_TRUST_PER_TOUR) {
+      console.log(
+        `Skipping overwrite for tour "${tourKey}" (only ${count} incoming rows; min=${MIN_ROWS_TO_TRUST_PER_TOUR}).`
+      );
+      continue;
+    }
+
+    // Remove UPCOMING master rows for this tourKey
+    out = out.filter((m) => {
+      const sameTour = keyTour(m.tour) === tourKey;
+      if (!sameTour) return true;
+      return !isUpcoming(m.start); // keep past
+    });
+
+    // Add incoming (assumed to be authoritative upcoming)
+    out.push(...rows);
+  }
+
+  return out;
+}
+
+/* ----------------------------
+   Running sources
+---------------------------- */
 async function runSource(s: Source): Promise<boolean> {
-  if (!isValidUrl(s.url)) return false;
+  if (!s.url || s.url.includes("PASTE_URL_HERE")) return false;
 
   let events: ProPathEvent[] = [];
 
@@ -176,43 +200,52 @@ async function runSource(s: Source): Promise<boolean> {
     events = await runHtmlBlocks(s as any);
   }
 
-  if (!events.length) return false;
+  if (!events.length) {
+    console.log(`No rows for source "${s.id}"`);
+    return false;
+  }
 
   writeEventsCsv(s.output, events as any);
+  console.log(`Wrote ${events.length} rows -> ${s.output}`);
   return true;
 }
 
-function mergeIncomingMiniTourMaster() {
-  const dataDir = path.resolve("data");
-  const masterPath = path.join(dataDir, "ProPath-MiniTour2026-MasterEvents.csv");
+/* ----------------------------
+   Merge step
+---------------------------- */
+function mergeIncomingIntoMiniMaster() {
+  const existing = parseCsvToEvents(safeRead(MASTER_MINI));
 
-  const existingCsv = safeRead(masterPath);
-  const existing = parseCsvToEvents(existingCsv);
-
-  const incomingFiles = fs.existsSync(dataDir)
-    ? fs.readdirSync(dataDir).filter((f) => f.startsWith("_incoming_") && f.endsWith(".csv"))
+  const incomingFiles = fs.existsSync(DATA_DIR)
+    ? fs
+        .readdirSync(DATA_DIR)
+        .filter((f) => f.startsWith("_incoming_") && f.endsWith(".csv"))
     : [];
 
   const incomingAll: ProPathEvent[] = [];
 
   for (const f of incomingFiles) {
-    const csv = safeRead(path.join(dataDir, f));
+    const full = path.join(DATA_DIR, f);
+    const csv = safeRead(full);
     const events = parseCsvToEvents(csv);
     incomingAll.push(...events);
   }
 
   if (!incomingAll.length) {
-    console.log("No incoming files — merge skipped.");
+    console.log("No incoming rows found — merge skipped.");
     return;
   }
 
-  const replaced = replaceUpcomingByTour(existing, incomingAll);
-  const finalRows = dedupeAndSort(replaced);
+  const merged = mergeMasterWithIncoming(existing, incomingAll);
+  const finalRows = dedupeAndSort(merged);
 
   writeEventsCsv("data/ProPath-MiniTour2026-MasterEvents.csv", finalRows as any);
-  console.log(`MiniTour master updated: ${finalRows.length} rows`);
+  console.log(`✅ Master updated: ${finalRows.length} rows`);
 }
 
+/* ----------------------------
+   Main
+---------------------------- */
 async function main() {
   const sourcesPath = path.resolve("data", "sources.json");
   const sources = JSON.parse(fs.readFileSync(sourcesPath, "utf8")) as Source[];
@@ -221,7 +254,7 @@ async function main() {
     await runSource(s);
   }
 
-  mergeIncomingMiniTourMaster();
+  mergeIncomingIntoMiniMaster();
 }
 
 main().catch((err) => {
