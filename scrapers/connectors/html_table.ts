@@ -27,35 +27,74 @@ function looksLikeDateCell(s: string) {
   );
 }
 
-function parseDateRange(dateText: string): { start: string | null; end: string | null } {
+/* ------------------------------------------------ */
+/* BlueGolf season year detection                  */
+/* ------------------------------------------------ */
+function getSeasonYear($: cheerio.CheerioAPI): number {
+  const text = $("body").text().replace(/\s+/g, " ");
+  const m =
+    text.match(/\b(20\d{2})\s*GPro\b/i) ||
+    text.match(/\bSeasons:\s*(20\d{2})\b/i);
+
+  return m ? Number(m[1]) : new Date().getFullYear();
+}
+
+/* ------------------------------------------------ */
+/* BlueGolf date parser (handles Mar 25-27, Apr 6) */
+/* ------------------------------------------------ */
+function parseBlueGolfDate(
+  dateText: string,
+  year: number
+): { start: string | null; end: string | null } {
   const raw = (dateText || "").replace(/\s+/g, " ").trim();
   if (!raw) return { start: null, end: null };
 
-  const dash = raw.includes("–") ? "–" : raw.includes("—") ? "—" : "-";
+  const cleaned = raw
+    .split("Register")[0]
+    .split("Opens")[0]
+    .trim();
 
-  const m = raw.match(/^([A-Za-z]+)\s+(\d{1,2})\s*[-–—]\s*(\d{1,2}),\s*(20\d{2})$/);
-  if (m) {
-    const mon = m[1];
-    const d1 = m[2];
-    const d2 = m[3];
-    const yr = m[4];
+  const dash = cleaned.includes("–")
+    ? "–"
+    : cleaned.includes("—")
+    ? "—"
+    : "-";
+
+  // Single day (Apr 6)
+  const single = cleaned.match(/^([A-Za-z]+)\s+(\d{1,2})$/);
+  if (single) {
     return {
-      start: coerceISO(`${mon} ${d1}, ${yr}`),
-      end: coerceISO(`${mon} ${d2}, ${yr}`)
+      start: coerceISO(`${single[1]} ${single[2]}, ${year}`),
+      end: null
     };
   }
 
-  if (raw.includes(dash)) {
-    const parts = raw.split(new RegExp(`\\s*\\${dash}\\s*`));
+  // Range (Mar 25-27)
+  const range = cleaned.match(
+    /^([A-Za-z]+)\s+(\d{1,2})\s*[-–—]\s*(\d{1,2})$/
+  );
+
+  if (range) {
+    const mon = range[1];
+    const d1 = range[2];
+    const d2 = range[3];
+
     return {
-      start: coerceISO(parts[0]?.trim() || ""),
-      end: coerceISO(parts.slice(1).join(dash).trim()) || null
+      start: coerceISO(`${mon} ${d1}, ${year}`),
+      end: coerceISO(`${mon} ${d2}, ${year}`)
     };
   }
 
-  return { start: coerceISO(raw), end: null };
+  // Fallback: append year
+  return {
+    start: coerceISO(`${cleaned}, ${year}`),
+    end: null
+  };
 }
 
+/* ------------------------------------------------ */
+/* Smart table picker                              */
+/* ------------------------------------------------ */
 function pickBestTable($: cheerio.CheerioAPI) {
   let best = $("table").first();
   let bestScore = -1;
@@ -83,6 +122,9 @@ function pickBestTable($: cheerio.CheerioAPI) {
   return best;
 }
 
+/* ------------------------------------------------ */
+/* MAIN CONNECTOR                                  */
+/* ------------------------------------------------ */
 export async function runHtmlTable(source: {
   url: string;
   defaults?: Record<string, string>;
@@ -94,11 +136,15 @@ export async function runHtmlTable(source: {
   });
 
   if (!res.ok) {
-    throw new Error(`html_table fetch failed: ${res.status} ${res.statusText}`);
+    throw new Error(
+      `html_table fetch failed: ${res.status} ${res.statusText}`
+    );
   }
 
   const html = await res.text();
   const $ = cheerio.load(html);
+
+  const seasonYear = getSeasonYear($);
 
   const table = source.tableSelector
     ? $(source.tableSelector).first()
@@ -112,40 +158,53 @@ export async function runHtmlTable(source: {
 
   table.find("tr").each((i, tr) => {
     const $tr = $(tr);
-    const tds = $tr.find("th,td").toArray();
+    const tds = $tr.find("td");
+
     if (tds.length < 2) return;
 
-    const cellText = tds.map(td =>
-      $(td).text().replace(/\s+/g, " ").trim()
-    );
+    const dateCell = $(tds[0])
+      .text()
+      .replace(/\s+/g, " ")
+      .trim();
 
-    const dateCell = cellText[0] || "";
-    const titleCell = cellText[1] || "";
-
-    if (i === 0 && /date/i.test(dateCell)) return;
     if (!looksLikeDateCell(dateCell)) return;
 
-    const link = $tr.find("a[href]").first();
-    const linkTitle = link.text().replace(/\s+/g, " ").trim();
-    const href = link.attr("href");
+    const titleCell = $(tds[1])
+      .clone()
+      .children()
+      .remove()
+      .end()
+      .text()
+      .replace(/\s+/g, " ")
+      .trim();
 
+    if (!titleCell || /register/i.test(titleCell)) return;
+
+    const { start, end } = parseBlueGolfDate(dateCell, seasonYear);
+    if (!start) return;
+
+    // Attempt to grab city/state from 2nd cell
+    const infoText = $(tds[1]).text();
+    const cityMatch = infoText.match(/([A-Za-z\s]+,\s*[A-Z]{2})/);
+    const cityState = cityMatch ? cityMatch[1] : "";
+
+    const city = cityState ? cityState.split(",")[0].trim() : "";
+    const state = cityState ? cityState.split(",")[1].trim() : "";
+
+    const state_country = state ? `${state}, USA` : "";
+
+    const href = $(tds[1]).find("a[href]").first().attr("href");
     const eventUrl = href
       ? new URL(href, source.url).toString()
       : source.url;
 
-    const title = linkTitle || titleCell;
-    if (!title) return;
-
-    const { start, end } = parseDateRange(dateCell);
-
-    const locCell = cellText[2] ?? cellText[3] ?? "";
-
     rows.push({
       ...(source.defaults ?? {}),
-      title,
+      title: titleCell,
       start,
       end,
-      state_country: locCell,
+      city,
+      state_country,
       tourUrl: eventUrl
     });
   });
