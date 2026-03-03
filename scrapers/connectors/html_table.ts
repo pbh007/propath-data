@@ -27,7 +27,6 @@ export type HtmlTableOptions = {
   gender?: string;
 };
 
-// This is the extractor (kept as default export)
 export default function extractEventsFromHtmlTable(
   html: string,
   opts: HtmlTableOptions
@@ -51,33 +50,37 @@ export default function extractEventsFromHtmlTable(
     const tds = $(tr).find("td");
     if (tds.length < 2) return;
 
+    // BlueGolf upcoming tables are typically:
+    // [0]=date, [1]=tournament/event (contains link), [2]=location, [3+]=other links
     const dateText = clean(tds.eq(0).text());
     const tournamentCell = tds.eq(1);
-    const registerCell = tds.eq(2);
+    const locationCell = tds.length >= 3 ? tds.eq(2) : null;
 
     const title =
       clean(tournamentCell.find("b,strong").first().text()) ||
-      clean(tournamentCell.find("a").first().text());
+      clean(tournamentCell.find("a").first().text()) ||
+      clean(tournamentCell.text());
 
-    // Skip empty / junk rows
     if (!title) return;
     if (/^register$/i.test(title)) return;
 
     const eventUrl = findEventUrl(tournamentCell, opts.baseUrl);
     if (!eventUrl) return;
 
-    const signupUrl = findSignupUrl(registerCell, opts.baseUrl);
+    const signupUrl = findSignupUrlInRow($(tr), opts.baseUrl);
 
     const { start, end } = parseDateRange(dateText, detectedYear);
-    if (!start) return; // prevents "tbd" junk getting into the CSV
+    if (!start) return;
 
-    const { city, state_country } = parseCityState(clean(tournamentCell.text()));
+    const locationText = locationCell ? clean(locationCell.text()) : clean(tournamentCell.text());
+    const { city, state_country } = parseCityStateFromLocation(locationText);
+
     const id = makeId(opts.tourName, title, start);
 
     rows.push({
       id,
       tour: opts.tourName,
-      gender: opts.gender || "",
+      gender: opts.gender || "Men",
       type: opts.defaultType || "Event",
       stage: "",
       title,
@@ -96,10 +99,8 @@ export default function extractEventsFromHtmlTable(
 }
 
 /**
- * ✅ This is what run-all.ts expects:
- * import { runHtmlTable } from "./connectors/html_table.js";
- *
- * It fetches the HTML, runs the extractor, and returns rows.
+ * run-all.ts expects:
+ *   import { runHtmlTable } from "./connectors/html_table.js";
  */
 export async function runHtmlTable(source: any): Promise<EventRow[]> {
   const url = source?.url;
@@ -107,7 +108,6 @@ export async function runHtmlTable(source: any): Promise<EventRow[]> {
 
   const res = await fetch(url, {
     headers: {
-      // Some sites behave better with a UA
       "User-Agent": "propath-data-scraper/1.0",
       "Accept": "text/html,application/xhtml+xml",
     },
@@ -127,7 +127,7 @@ export async function runHtmlTable(source: any): Promise<EventRow[]> {
     tableSelector: source?.tableSelector || "table",
     baseUrl: source?.url,
     defaultType: defaults.type || "Event",
-    gender: defaults.gender || "",
+    gender: defaults.gender || "Men",
   };
 
   return extractEventsFromHtmlTable(html, opts);
@@ -158,9 +158,9 @@ function findEventUrl(cell: any, base?: string) {
   return null;
 }
 
-function findSignupUrl(cell: any, base?: string) {
-  if (!cell) return "";
-  const links = cell.find("a").toArray();
+// More robust: scan the entire row for the signup link (BlueGolf moves columns around)
+function findSignupUrlInRow(row: any, base?: string) {
+  const links = row.find("a").toArray();
   for (const link of links) {
     const href = link.attribs?.href;
     if (!href) continue;
@@ -207,22 +207,17 @@ function toISO(year: number, month: number, day: number) {
   return `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
 }
 
-function parseCityState(text: string) {
-  // Typical GPro pattern: "Event Name · City, ST"
-  const m = text.match(/ · (.+?),\s*([A-Z]{2})\b/);
+// Pull ONLY the first "City, ST" from the location cell (ignores course names etc)
+function parseCityStateFromLocation(text: string) {
+  // Example: "Brunswick, GA Heritage Oaks GC"
+  const m = text.match(/^\s*([^,]+),\s*([A-Z]{2})\b/);
   if (m) {
-    return {
-      city: clean(m[1]),
-      state_country: m[2],
-    };
+    return { city: clean(m[1]), state_country: m[2] };
   }
 
-  const fallback = text.match(/(.+?),\s*([A-Z]{2})\b/);
-  if (fallback) {
-    return {
-      city: clean(fallback[1]),
-      state_country: fallback[2],
-    };
+  const anywhere = text.match(/\b([^,]+),\s*([A-Z]{2})\b/);
+  if (anywhere) {
+    return { city: clean(anywhere[1]), state_country: anywhere[2] };
   }
 
   return {};
