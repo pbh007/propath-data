@@ -76,9 +76,7 @@ export default function extractEventsFromHtmlTable(
     const { start, end } = parseDateRange(dateText, detectedYear);
     if (!start) return;
 
-    // ✅ Key fix for BlueGolf-style tables:
-    // Tournament cell contains multiple lines separated by <br>
-    // We convert <br> -> "\n", then grab the line that matches "City, ST"
+    // ✅ Robust BlueGolf fix: regex-scan the FULL flattened text for "City, ST"
     const { city, state_country } = parseCityStateFromTournamentCell(tournamentCell);
 
     const id = makeId(opts.tourName, title, start);
@@ -213,24 +211,20 @@ function toISO(year: number, month: number, day: number) {
   return `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
 }
 
+/**
+ * BlueGolf flattens the tournament cell text, but it STILL contains "City, ST".
+ * We just find the first occurrence of that pattern and use it.
+ */
 function parseCityStateFromTournamentCell(cell: any): { city: string; state_country: string } {
   if (!cell) return { city: "", state_country: "" };
 
-  // Clone so we can safely mutate <br> tags
+  // Build a "flattened but readable" text blob
   const cloned = cell.clone();
+  cloned.find("br").replaceWith(" "); // spacing helps, but we don't rely on line breaks
+  const text = clean(cloned.text());
 
-  // Convert <br> into newlines so text keeps line structure
-  cloned.find("br").replaceWith("\n");
-
-  // Get lines, trimmed
-  const raw = (cloned.text() || "").split("\n").map((x: string) => clean(x)).filter(Boolean);
-
-  // Find the first line that looks like "City, ST"
-  // e.g. "Brunswick, GA" or "Jekyll Island, GA"
-  const locLine = raw.find((line: string) => /\b[^,]{2,},\s*[A-Z]{2}\b/.test(line));
-  if (!locLine) return { city: "", state_country: "" };
-
-  const m = locLine.match(/^(.+?),\s*([A-Z]{2})\b/);
+  // Find first "City, ST" (multi-word city supported)
+  const m = text.match(/\b([A-Za-z][A-Za-z .'-]{1,60}),\s*([A-Z]{2})\b/);
   if (!m) return { city: "", state_country: "" };
 
   return { city: clean(m[1]), state_country: m[2] };
