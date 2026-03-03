@@ -1,259 +1,436 @@
 // scrapers/connectors/html_table.ts
-import { load } from "cheerio";
-import { coerceISO } from "../lib/normalize.js";
+import * as cheerio from "cheerio";
 
-type ProPathEvent = {
-  id?: string;
-  tour?: string;
+/**
+ * Generic "HTML table -> event rows" extractor.
+ * Includes special handling for BlueGolf/GPro schedule tables.
+ *
+ * Key goals:
+ * - Only emit REAL events (must have a start date + real event page URL)
+ * - Skip junk rows (Register-only, gosecure-only, headers)
+ * - Extract clean city/state (avoid "NCAlbemarle..." concatenation)
+ */
+
+export type EventRow = {
+  id: string;
+  tour: string;
   gender?: string;
   type?: string;
   stage?: string;
-  title?: string;
-  start?: string | null;
-  end?: string | null;
+  title: string;
+  start?: string; // YYYY-MM-DD
+  end?: string; // YYYY-MM-DD
   city?: string;
   state_country?: string;
   tourUrl?: string;
   signupUrl?: string;
   mondayUrl?: string;
-  mondayDate?: string | null;
+  mondayDate?: string;
 };
 
-function norm(s: string) {
-  return (s || "")
+export type HtmlTableOptions = {
+  /** Name of tour to stamp on rows */
+  tourName: string;
+
+  /** Optional explicit year override (e.g., 2026). If omitted, we try to detect from the page. */
+  year?: number;
+
+  /** For sites with multiple tables, you can narrow selection */
+  tableSelector?: string;
+
+  /** Optional baseUrl for resolving relative links */
+  baseUrl?: string;
+
+  /** Optional: force "type" (Event/QSchool/etc) */
+  defaultType?: string;
+
+  /** Optional: gender */
+  gender?: string;
+};
+
+/** Backwards-compatible aliases (in case other code imports these names) */
+export const htmlTableToEvents = extractEventsFromHtmlTable;
+export const parseHtmlTable = extractEventsFromHtmlTable;
+export default extractEventsFromHtmlTable;
+
+/* =========================
+   Public API
+   ========================= */
+
+export function extractEventsFromHtmlTable(
+  html: string,
+  opts: HtmlTableOptions
+): EventRow[] {
+  const $ = cheerio.load(html);
+
+  const year = opts.year ?? detectYear($) ?? new Date().getFullYear();
+
+  // Prefer a specific table if provided; else choose the "best" one.
+  const table =
+    (opts.tableSelector ? $(opts.tableSelector).first() : null) ||
+    chooseBestTable($);
+
+  if (!table || table.length === 0) return [];
+
+  const headerMap = buildHeaderMap($, table);
+
+  const rows: EventRow[] = [];
+
+  table.find("tr").each((_, tr) => {
+    const tds = $(tr).find("th,td");
+    if (tds.length === 0) return;
+
+    // Skip header-ish rows
+    const rowText = norm($(tr).text());
+    if (!rowText || /^date\s+tournaments/i.test(rowText)) return;
+
+    const dateCell = getCellText($, tds, headerMap, ["date"]);
+    const tourCell = getCellText($, tds, headerMap, ["tournaments", "tournament"]);
+    const registerCell = getCellText($, tds, headerMap, ["register", "signup"]);
+
+    const tourCellEl = getCellEl($, tds, headerMap, ["tournaments", "tournament"]);
+    const registerCellEl = getCellEl($, tds, headerMap, ["register", "signup"]);
+
+    const tourCellFlat = norm(
+      [tourCell, registerCell].filter(Boolean).join(" ")
+    );
+
+    // Title extraction (BlueGolf: first bold/strong/anchor text in Tournaments cell)
+    let title =
+      norm(tourCellEl.find("b,strong").first().text()) ||
+      norm(tourCellEl.find("a").first().text()) ||
+      guessTitleFromCell(tourCell);
+
+    // If title still empty, try overall row
+    if (!title) title = guessTitleFromCell(rowText);
+
+    // Extract URLs
+    const eventUrl =
+      pickBestEventUrl($, tourCellEl, registerCellEl, opts.baseUrl) || "";
+    const signupUrl =
+      pickBestSignupUrl($, tourCellEl, registerCellEl, opts.baseUrl) || "";
+
+    // Date parse
+    const { start, end } = parseDateRange(dateCell, year);
+
+    // City/state parse (from "Club · City, ST" or any "City, ST" pattern)
+    const { city, state_country } = parseCityState(tourCell, tourCellFlat);
+
+    // ========= Surgical filters (prevents "-tbd" + junk rows) =========
+
+    // Skip junk rows that BlueGolf includes (register-only rows, etc.)
+    const badTitle =
+      !title || /^register$/i.test(title) || title.length < 3;
+    if (badTitle) return;
+
+    // Must have a real event page (not just gosecure)
+    if (!eventUrl || /\/util\/gosecure\.htm/i.test(eventUrl)) return;
+
+    // If we couldn’t parse a start date, don’t emit the row (prevents "-tbd" duplicates)
+    if (!start) return;
+
+    // ================================================================
+
+    const id = makeId(opts.tourName, title, start);
+
+    rows.push({
+      id,
+      tour: opts.tourName,
+      gender: opts.gender ?? "",
+      type: opts.defaultType ?? "Event",
+      stage: "",
+      title,
+      start,
+      end: end || "",
+      city: city || "",
+      state_country: state_country || "",
+      tourUrl: eventUrl,
+      signupUrl: signupUrl || "",
+      mondayUrl: "",
+      mondayDate: "",
+    });
+  });
+
+  return rows;
+}
+
+/* =========================
+   Helpers
+   ========================= */
+
+function norm(s: string | undefined | null): string {
+  return String(s ?? "")
     .replace(/\u00a0/g, " ")
     .replace(/\s+/g, " ")
     .trim();
 }
 
-function looksLikeDateToken(s: string) {
-  const t = norm(s);
-  return /\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\b/i.test(t);
-}
-
-/**
- * Pull a clean BlueGolf date token out of messy text.
- * Handles:
- *  - "Mar 25-27 Register"
- *  - "Apr 8-10"
- *  - "Apr 6"
- *  - "Nov 30-Dec 2"
- */
-function extractCleanDateToken(text: string): string {
-  const t = norm(text);
-
-  // "Nov 30-Dec 2"
-  const cross = t.match(
-    /\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\b\s+\d{1,2}\s*[-–—]\s*\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\b\s+\d{1,2}\b/i
-  );
-  if (cross) return norm(cross[0]);
-
-  // "Mar 25-27" OR "Apr 8-10"
-  const range = t.match(
-    /\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\b\s+\d{1,2}\s*[-–—]\s*\d{1,2}\b/i
-  );
-  if (range) return norm(range[0]);
-
-  // "Apr 6"
-  const single = t.match(
-    /\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\b\s+\d{1,2}\b/i
-  );
-  if (single) return norm(single[0]);
-
-  return t;
-}
-
-function cellLines($: ReturnType<typeof load>, el: any): string[] {
-  // BlueGolf uses a middle dot "·" between course and city/state, so split on that too.
-  const raw = ($(el).text() || "")
-    .replace(/\u00a0/g, " ")
-    .replace(/·/g, "\n");
-
-  return raw
-    .split(/\r?\n+/)
-    .map(s => s.trim())
-    .filter(Boolean);
-}
-
-function slugify(s: string) {
-  return norm(s)
-    .toLowerCase()
-    .replace(/&/g, " and ")
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/-+/g, "-")
-    .replace(/^-|-$/g, "");
-}
-
-function inferSeasonYearFromHtml(htmlText: string): number | null {
-  // Prefer "2026 GPro" in the UI
-  const m1 = htmlText.match(/\b(20\d{2})\b\s*GPro\b/i);
-  if (m1) {
-    const yr = Number(m1[1]);
-    return Number.isFinite(yr) ? yr : null;
+function resolveUrl(url: string, baseUrl?: string): string {
+  const u = norm(url);
+  if (!u) return "";
+  if (/^https?:\/\//i.test(u)) return u;
+  if (!baseUrl) return u;
+  try {
+    return new URL(u, baseUrl).toString();
+  } catch {
+    return u;
   }
-  return null;
 }
 
-function parseBlueGolfDateToken(token: string, seasonYear: number | null): { start: string | null; end: string | null } {
-  if (!seasonYear) return { start: null, end: null };
-
-  const raw = extractCleanDateToken(token);
-  if (!raw || !looksLikeDateToken(raw)) return { start: null, end: null };
-
-  // "Nov 30-Dec 2"
-  const cross = raw.match(/^([A-Za-z]+)\s+(\d{1,2})\s*[-–—]\s*([A-Za-z]+)\s+(\d{1,2})$/i);
-  if (cross) {
-    return {
-      start: coerceISO(`${cross[1]} ${cross[2]}, ${seasonYear}`),
-      end: coerceISO(`${cross[3]} ${cross[4]}, ${seasonYear}`)
-    };
-  }
-
-  // "Mar 25-27"
-  const range = raw.match(/^([A-Za-z]+)\s+(\d{1,2})\s*[-–—]\s*(\d{1,2})$/i);
-  if (range) {
-    return {
-      start: coerceISO(`${range[1]} ${range[2]}, ${seasonYear}`),
-      end: coerceISO(`${range[1]} ${range[3]}, ${seasonYear}`)
-    };
-  }
-
-  // "Apr 6"
-  const single = raw.match(/^([A-Za-z]+)\s+(\d{1,2})$/i);
-  if (single) {
-    return {
-      start: coerceISO(`${single[1]} ${single[2]}, ${seasonYear}`),
-      end: null
-    };
-  }
-
-  // last resort (rare)
-  return { start: coerceISO(raw), end: null };
-}
-
-function pickBestTable($: ReturnType<typeof load>) {
-  let best = $("table").first();
+function chooseBestTable($: cheerio.CheerioAPI): cheerio.Cheerio<cheerio.Element> {
+  // Pick the table with the most rows and containing "Date" + "Tournaments" in header.
+  let best: cheerio.Cheerio<cheerio.Element> = $("table").first();
   let bestScore = -1;
 
   $("table").each((_, tbl) => {
-    const table = $(tbl);
-    const trs = table.find("tr").toArray();
-    let score = 0;
+    const t = $(tbl);
+    const headerText = norm(t.find("tr").first().text()).toLowerCase();
+    const rowCount = t.find("tr").length;
 
-    for (const tr of trs.slice(0, 25)) {
-      const tds = $(tr).find("th,td");
-      if (tds.length < 2) continue;
-
-      const firstText = norm($(tds[0]).text());
-      if (looksLikeDateToken(firstText)) score += 3;
-
-      const hasRegister = $(tr).find("a").toArray().some(a => /register/i.test(norm($(a).text())));
-      if (hasRegister) score += 3;
-
-      if ($(tr).find("a[href]").length) score += 1;
-    }
+    let score = rowCount;
+    if (headerText.includes("date")) score += 50;
+    if (headerText.includes("tournament")) score += 50;
+    if (headerText.includes("tournaments")) score += 50;
+    if (headerText.includes("register")) score += 20;
 
     if (score > bestScore) {
       bestScore = score;
-      best = table;
+      best = t;
     }
   });
 
   return best;
 }
 
-export async function runHtmlTable(source: {
-  url: string;
-  defaults?: Record<string, string>;
-  tableSelector?: string;
-}): Promise<ProPathEvent[]> {
-  const res = await fetch(source.url, {
-    headers: { "user-agent": "propath-bot" }
+function buildHeaderMap(
+  $: cheerio.CheerioAPI,
+  table: cheerio.Cheerio<cheerio.Element>
+): Record<string, number> {
+  const map: Record<string, number> = {};
+  const headerRow = table.find("tr").first();
+  const cells = headerRow.find("th,td");
+
+  cells.each((i, cell) => {
+    const text = norm($(cell).text()).toLowerCase();
+    if (!text) return;
+
+    if (text.includes("date")) map["date"] = i;
+    if (text.includes("tournament")) map["tournaments"] = i;
+    if (text.includes("register")) map["register"] = i;
+    if (text.includes("signup")) map["signup"] = i;
   });
 
-  if (!res.ok) {
-    throw new Error(`html_table fetch failed: ${res.status} ${res.statusText}`);
+  return map;
+}
+
+function getCellEl(
+  $: cheerio.CheerioAPI,
+  tds: cheerio.Cheerio<cheerio.Element>,
+  headerMap: Record<string, number>,
+  keys: string[]
+): cheerio.Cheerio<cheerio.Element> {
+  for (const k of keys) {
+    const idx = headerMap[k];
+    if (typeof idx === "number" && idx >= 0 && idx < tds.length) {
+      return tds.eq(idx);
+    }
+  }
+  // Fallback: return first td
+  return tds.eq(0);
+}
+
+function getCellText(
+  $: cheerio.CheerioAPI,
+  tds: cheerio.Cheerio<cheerio.Element>,
+  headerMap: Record<string, number>,
+  keys: string[]
+): string {
+  return norm(getCellEl($, tds, headerMap, keys).text());
+}
+
+function detectYear($: cheerio.CheerioAPI): number | null {
+  // BlueGolf schedule pages often have a dropdown showing "2026 GPro" etc.
+  // We look for a strong "20xx" near a select option or a visible label.
+  const textBlob = norm($("body").text());
+  const m = textBlob.match(/\b(20\d{2})\b/);
+  if (m) {
+    const y = Number(m[1]);
+    if (y >= 2000 && y <= 2100) return y;
   }
 
-  const html = await res.text();
-  const $ = load(html);
+  // Try specific select option patterns
+  const opt = $("select option:selected").first();
+  const optText = norm(opt.text());
+  const m2 = optText.match(/\b(20\d{2})\b/);
+  if (m2) {
+    const y = Number(m2[1]);
+    if (y >= 2000 && y <= 2100) return y;
+  }
 
-  const forcedSeasonYear = source.defaults?.seasonYear ? Number(source.defaults.seasonYear) : null;
-  const inferredSeasonYear = inferSeasonYearFromHtml(html);
-  const seasonYear = forcedSeasonYear || inferredSeasonYear;
+  return null;
+}
 
-  const table = source.tableSelector ? $(source.tableSelector).first() : pickBestTable($);
-  if (!table.length) throw new Error("html_table: no table found");
+function guessTitleFromCell(cellText: string): string {
+  const s = norm(cellText);
+  if (!s) return "";
 
-  const rows: ProPathEvent[] = [];
+  // BlueGolf often repeats title + club + city. Take the first "chunk" before " · " or newline-like separators
+  const parts = s.split("·").map(norm).filter(Boolean);
+  if (parts.length > 0) {
+    // The left side often starts with TITLE (sometimes repeated). Take first 1-6 words if very long
+    const t = parts[0];
+    if (t.length <= 60) return t;
+    return t.split(" ").slice(0, 8).join(" ");
+  }
 
-  table.find("tr").each((i, tr) => {
-    const $tr = $(tr);
-    const tds = $tr.find("th,td").toArray();
-    if (tds.length < 2) return;
+  // Fallback: first 8 words
+  return s.split(" ").slice(0, 8).join(" ");
+}
 
-    const dateCellFlat = norm($(tds[0]).text());
-    const tourCellFlat = norm($(tds[1]).text());
+function pickBestEventUrl(
+  $: cheerio.CheerioAPI,
+  tourCellEl: cheerio.Cheerio<cheerio.Element>,
+  registerCellEl: cheerio.Cheerio<cheerio.Element>,
+  baseUrl?: string
+): string | null {
+  const links = [
+    ...tourCellEl.find("a").toArray(),
+    ...registerCellEl.find("a").toArray(),
+  ];
 
-    if (i === 0 && /date/i.test(dateCellFlat)) return;
+  // Prefer actual event page links containing "/event/" and ending in .htm/.html
+  for (const a of links) {
+    const href = norm($(a).attr("href"));
+    if (!href) continue;
+    if (/\/event\/.+\.(htm|html)\b/i.test(href)) return resolveUrl(href, baseUrl);
+  }
 
-    // Date token (cleaned)
-    const dateToken = extractCleanDateToken(dateCellFlat);
-    if (!looksLikeDateToken(dateToken)) return;
+  // Next best: any link that looks like a BlueGolf event index
+  for (const a of links) {
+    const href = norm($(a).attr("href"));
+    if (!href) continue;
+    if (/bluegolf\/.+\/event\/.+\/index\.(htm|html)\b/i.test(href))
+      return resolveUrl(href, baseUrl);
+  }
 
-    const { start, end } = parseBlueGolfDateToken(dateToken, seasonYear);
+  return null;
+}
 
-    // Tournament lines (split on "·" as well)
-    const tourLines = cellLines($, tds[1]);
+function pickBestSignupUrl(
+  $: cheerio.CheerioAPI,
+  tourCellEl: cheerio.Cheerio<cheerio.Element>,
+  registerCellEl: cheerio.Cheerio<cheerio.Element>,
+  baseUrl?: string
+): string | null {
+  const links = [
+    ...registerCellEl.find("a").toArray(),
+    ...tourCellEl.find("a").toArray(),
+  ];
 
-    // Event link + title
-    const eventLink = $(tds[1]).find("a[href]").first();
-    const eventTitleFromLink = norm(eventLink.text());
-    const eventHref = eventLink.attr("href");
-    const eventUrl = eventHref ? new URL(eventHref, source.url).toString() : source.url;
+  // Prefer gosecure links (registration flow)
+  for (const a of links) {
+    const href = norm($(a).attr("href"));
+    if (!href) continue;
+    if (/\/util\/gosecure\.htm/i.test(href)) return resolveUrl(href, baseUrl);
+  }
 
-    const title = eventTitleFromLink || tourLines[0] || tourCellFlat;
-    if (!title) return;
-
-    // City/state line: prefer a clean line like "Brunswick, GA"
-    const cityStateLine =
-      tourLines.find(l => /,\s*[A-Z]{2}\b/.test(l)) ||
-      (tourCellFlat.replace(/·/g, " ").match(/([A-Za-z .'-]+),\s*([A-Z]{2})\b/)?.[0] ?? "");
-
-    let city: string | undefined;
-    let state_country: string | undefined;
-    const m = cityStateLine.match(/^(.+?),\s*([A-Z]{2})\b/);
-    if (m) {
-      city = norm(m[1]);
-      state_country = m[2];
+  // Fallback: any link with "/secure/" or "start?"
+  for (const a of links) {
+    const href = norm($(a).attr("href"));
+    if (!href) continue;
+    if (/\/secure\//i.test(href) || /\bstart\?/i.test(href)) {
+      return resolveUrl(href, baseUrl);
     }
+  }
 
-    // Register link (signup) usually in the date cell
-    let signupUrl: string | undefined;
-    const allLinks = $tr.find("a[href]").toArray().map(a => ({
-      text: norm($(a).text()),
-      href: $(a).attr("href") || ""
-    }));
-    const reg =
-      allLinks.find(l => /register/i.test(l.text)) ||
-      allLinks.find(l => /secure|gosecure/i.test(l.href));
-    if (reg?.href) signupUrl = new URL(reg.href, source.url).toString();
+  return null;
+}
 
-    const id = `gpro-tour-${slugify(title)}-${start || "tbd"}`;
+function parseDateRange(dateText: string, year: number): { start?: string; end?: string } {
+  const s = norm(dateText);
+  if (!s) return {};
 
-    rows.push({
-      ...(source.defaults ?? {}),
-      id,
-      title,
-      start,
-      end,
-      city,
-      state_country,
-      tourUrl: eventUrl,
-      signupUrl
-    });
-  });
+  // If already ISO-ish
+  const iso = s.match(/\b(20\d{2})-(\d{2})-(\d{2})\b/);
+  if (iso) {
+    const start = `${iso[1]}-${iso[2]}-${iso[3]}`;
+    return { start };
+  }
 
-  if (!rows.length) throw new Error("html_table: 0 events parsed");
-  return rows;
+  // BlueGolf common: "Mar 25-27" or "Apr 8-10" or "Apr 6"
+  const m = s.match(
+    /\b([A-Za-z]{3,})\s+(\d{1,2})(?:\s*[-–]\s*(\d{1,2}))?\b/
+  );
+  if (!m) return {};
+
+  const monthName = m[1].toLowerCase();
+  const day1 = Number(m[2]);
+  const day2 = m[3] ? Number(m[3]) : null;
+
+  const month = monthToNumber(monthName);
+  if (!month) return {};
+
+  const start = toISO(year, month, day1);
+  const end = day2 ? toISO(year, month, day2) : "";
+
+  return { start, end };
+}
+
+function monthToNumber(m: string): number | null {
+  const k = m.slice(0, 3).toLowerCase();
+  const map: Record<string, number> = {
+    jan: 1,
+    feb: 2,
+    mar: 3,
+    apr: 4,
+    may: 5,
+    jun: 6,
+    jul: 7,
+    aug: 8,
+    sep: 9,
+    oct: 10,
+    nov: 11,
+    dec: 12,
+  };
+  return map[k] ?? null;
+}
+
+function toISO(year: number, month: number, day: number): string {
+  const yyyy = String(year);
+  const mm = String(month).padStart(2, "0");
+  const dd = String(day).padStart(2, "0");
+  return `${yyyy}-${mm}-${dd}`;
+}
+
+function parseCityState(tourCell: string, tourCellFlat: string): { city?: string; state_country?: string } {
+  const text = norm([tourCell, tourCellFlat].filter(Boolean).join(" "));
+
+  // Prefer " · City, ST" pattern
+  const dotSplit = text.split("·").map(norm);
+  for (const part of dotSplit) {
+    const m = part.match(/(.+?),\s*([A-Z]{2})\b/);
+    if (m) {
+      return { city: norm(m[1]), state_country: m[2] };
+    }
+  }
+
+  // Fallback: any "City, ST" occurrence
+  const m2 = text.match(/(.+?),\s*([A-Z]{2})\b/);
+  if (m2) {
+    return { city: norm(m2[1]), state_country: m2[2] };
+  }
+
+  return {};
+}
+
+function makeId(tourName: string, title: string, startISO: string): string {
+  const base = `${tourName}-${title}-${startISO}`
+    .toLowerCase()
+    .replace(/&/g, "and")
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "");
+
+  // Shorten if absurdly long
+  return base.length > 120 ? base.slice(0, 120).replace(/-$/g, "") : base;
 }
