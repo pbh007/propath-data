@@ -1,4 +1,5 @@
-import * as cheerio from "cheerio";
+// scrapers/connectors/html_table.ts
+import { load } from "cheerio";
 import { coerceISO } from "../lib/normalize.js";
 
 type ProPathEvent = {
@@ -18,103 +19,110 @@ type ProPathEvent = {
   mondayDate?: string | null;
 };
 
-type Source = {
-  url: string;
-  defaults?: Record<string, string>;
-  tableSelector?: string;
-};
-
-/** Month name to number helper */
-const MON = {
-  jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6,
-  jul: 7, aug: 8, sep: 9, oct: 10, nov: 11, dec: 12
-} as const;
-
-function normalizeSpace(s: string) {
+function norm(s: string) {
   return (s || "").replace(/\s+/g, " ").trim();
 }
 
-/** Detects cells like "Mar 25-27" / "Aug 11-13" / "Apr 6" etc */
-function looksLikeBlueGolfDateCell(s: string) {
-  const t = normalizeSpace(s);
-  if (!t) return false;
-  // matches "Mar 25-27" or "Mar 25 – 27" or "Mar 25" etc
+function looksLikeDateCell(s: string) {
+  const t = norm(s);
+  // BlueGolf often uses: "Mar 25-27", "Apr 6", "Apr 8-10", "Sep 22-24"
   return /\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\b/i.test(t);
 }
 
-/** Pulls year from page (dropdown like "2026 GPro" or any '20xx' present) */
-function extractYearFromPage($: any, html: string): number {
-  const txt = normalizeSpace($("body").text() || "");
-  const m1 = txt.match(/\b(20\d{2})\b/);
-  if (m1) return Number(m1[1]);
-
-  const m2 = (html || "").match(/\b(20\d{2})\b/);
-  if (m2) return Number(m2[1]);
-
-  // fallback to current year
-  return new Date().getFullYear();
-}
-
-function parseBlueGolfMonthDay(monthDay: string, year: number): string | null {
-  const t = normalizeSpace(monthDay);
-  const m = t.match(/^([A-Za-z]{3})\s+(\d{1,2})$/);
-  if (!m) return coerceISO(`${t} ${year}`); // try general
-  const mon = m[1].toLowerCase() as keyof typeof MON;
-  const day = Number(m[2]);
-  const mm = MON[mon];
-  if (!mm || !day) return null;
-  const iso = `${year}-${String(mm).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
-  return coerceISO(iso);
+function slugify(s: string) {
+  return norm(s)
+    .toLowerCase()
+    .replace(/&/g, " and ")
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "");
 }
 
 /**
- * Date range formats on BlueGolf:
- * - "Mar 25-27"
- * - "Aug 11-13"
- * - "Apr 6" (single day)
- * - occasionally "Apr 8-10"
+ * Try to infer the season year from the page header/dropdown.
+ * Screenshot shows "2026 GPro" on the page.
  */
-function parseBlueGolfDateRange(dateCell: string, year: number): { start: string | null; end: string | null } {
-  const raw = normalizeSpace(dateCell);
-  if (!raw) return { start: null, end: null };
-
-  // handle en dash/em dash too
-  const dash = raw.includes("–") ? "–" : raw.includes("—") ? "—" : "-";
-
-  // "Mar 25-27"
-  const m = raw.match(/^([A-Za-z]{3})\s+(\d{1,2})\s*[-–—]\s*(\d{1,2})$/);
-  if (m) {
-    const mon = m[1];
-    const d1 = `${mon} ${m[2]}`;
-    const d2 = `${mon} ${m[3]}`;
-    return {
-      start: parseBlueGolfMonthDay(d1, year),
-      end: parseBlueGolfMonthDay(d2, year)
-    };
-  }
-
-  // "Mar 25 - Apr 1" (rare but possible)
-  if (raw.includes(dash) && /[A-Za-z]{3}/.test(raw.split(dash)[1] || "")) {
-    const parts = raw.split(new RegExp(`\\s*\\${dash}\\s*`)).map(p => normalizeSpace(p));
-    const a = parts[0] || "";
-    const b = parts[1] || "";
-    return {
-      start: parseBlueGolfMonthDay(a, year),
-      end: parseBlueGolfMonthDay(b, year)
-    };
-  }
-
-  // single day "Apr 6"
-  const s = parseBlueGolfMonthDay(raw, year);
-  return { start: s, end: null };
+function inferSeasonYearFromPage(htmlText: string): number | null {
+  // Be intentionally broad; BlueGolf markup varies.
+  // Prefer "2026 GPro" / "2026" near the top.
+  const m = htmlText.match(/\b(20\d{2})\b\s*GPro\b/i) || htmlText.match(/\b(20\d{2})\b/);
+  if (!m) return null;
+  const yr = Number(m[1]);
+  return Number.isFinite(yr) ? yr : null;
 }
 
-/** Choose best table if selector not supplied */
-function pickBestTable($: any) {
+/**
+ * Parse BlueGolf date cell text like:
+ * - "Mar 25-27"
+ * - "Apr 6"
+ * - "Apr 8-10"
+ * - (occasionally) "Nov 30-Dec 2"
+ *
+ * Uses seasonYear because the table usually omits the year.
+ */
+function parseBlueGolfDateCell(dateText: string, seasonYear: number | null): { start: string | null; end: string | null } {
+  const raw = norm(dateText);
+  if (!raw) return { start: null, end: null };
+
+  // Handle "Nov 30-Dec 2"
+  const cross = raw.match(
+    /^([A-Za-z]+)\s+(\d{1,2})\s*[-–—]\s*([A-Za-z]+)\s+(\d{1,2})$/i
+  );
+  if (cross && seasonYear) {
+    const mon1 = cross[1];
+    const d1 = cross[2];
+    const mon2 = cross[3];
+    const d2 = cross[4];
+    return {
+      start: coerceISO(`${mon1} ${d1}, ${seasonYear}`),
+      end: coerceISO(`${mon2} ${d2}, ${seasonYear}`)
+    };
+  }
+
+  // Handle "Mar 25-27" OR "Apr 8-10"
+  const range = raw.match(/^([A-Za-z]+)\s+(\d{1,2})\s*[-–—]\s*(\d{1,2})$/i);
+  if (range && seasonYear) {
+    const mon = range[1];
+    const d1 = range[2];
+    const d2 = range[3];
+    return {
+      start: coerceISO(`${mon} ${d1}, ${seasonYear}`),
+      end: coerceISO(`${mon} ${d2}, ${seasonYear}`)
+    };
+  }
+
+  // Handle "Apr 6"
+  const single = raw.match(/^([A-Za-z]+)\s+(\d{1,2})$/i);
+  if (single && seasonYear) {
+    const mon = single[1];
+    const d = single[2];
+    return {
+      start: coerceISO(`${mon} ${d}, ${seasonYear}`),
+      end: null
+    };
+  }
+
+  // Fallback: if the text includes a year already, coerce it
+  const maybe = coerceISO(raw);
+  return { start: maybe, end: null };
+}
+
+/**
+ * Extract "City, ST" from the tournament cell text.
+ */
+function extractCityState(s: string): { city: string | null; st: string | null } {
+  const t = norm(s);
+  // Find last-ish "Something, XX" pattern
+  const m = t.match(/([A-Za-z .'-]+),\s*([A-Z]{2})\b/);
+  if (!m) return { city: null, st: null };
+  return { city: norm(m[1]), st: m[2] };
+}
+
+function pickBestTable($: ReturnType<typeof load>) {
   let best = $("table").first();
   let bestScore = -1;
 
-  $("table").each((_: any, tbl: any) => {
+  $("table").each((_, tbl) => {
     const table = $(tbl);
     const trs = table.find("tr").toArray();
     let score = 0;
@@ -123,10 +131,16 @@ function pickBestTable($: any) {
       const tds = $(tr).find("th,td");
       if (tds.length < 2) continue;
 
-      const first = normalizeSpace($(tds[0]).text());
-      if (looksLikeBlueGolfDateCell(first)) score += 3;
-      if ($(tr).find("a[href]").length) score += 1;
-      if (/tournament|tournaments|events/i.test(normalizeSpace($(tr).text()))) score += 1;
+      const first = norm($(tds[0]).text());
+      if (looksLikeDateCell(first)) score += 3;
+
+      // BlueGolf rows almost always have event links
+      const hasLinks = $(tr).find("a[href]").length;
+      if (hasLinks) score += 1;
+
+      // If we see "Register" links, it’s almost certainly the schedule table
+      const hasRegister = $(tr).find("a").toArray().some(a => /register/i.test(norm($(a).text())));
+      if (hasRegister) score += 2;
     }
 
     if (score > bestScore) {
@@ -138,131 +152,100 @@ function pickBestTable($: any) {
   return best;
 }
 
-/** Extract title from the tournament column cell */
-function extractTitleFromTournamentCell($td: any) {
-  // Prefer strong/bold title if present
-  const strong = normalizeSpace($td.find("strong").first().text());
-  if (strong) return strong;
+export async function runHtmlTable(source: {
+  url: string;
+  defaults?: Record<string, string>;
+  tableSelector?: string;
 
-  // Otherwise first link text that isn't "Register"
-  const links = $td.find("a").toArray();
-  for (const a of links) {
-    const t = normalizeSpace($td.find(a).text());
-    if (t && !/^register$/i.test(t)) return t;
+  /**
+   * Optional: for sites that omit year and you want to force it (e.g., 2027)
+   * You can set defaults: { seasonYear: "2027" } in sources.json later.
+   */
+}): Promise<ProPathEvent[]> {
+  const res = await fetch(source.url, {
+    headers: { "user-agent": "propath-bot" }
+  });
+
+  if (!res.ok) {
+    throw new Error(`html_table fetch failed: ${res.status} ${res.statusText}`);
   }
 
-  // Fallback: first line of text
-  const txt = normalizeSpace($td.text());
-  return txt;
-}
-
-/** Extract location-ish text from tournament cell: club + city/state often sit under title */
-function extractLocationFromTournamentCell($td: any) {
-  // The cell often contains:
-  // TITLE
-  // Club Name
-  // City, ST
-  // $price or closes etc
-  // We'll take the first "City, ST" line if present, else combine club+city.
-  const lines = normalizeSpace($td.text()).split(" ").filter(Boolean);
-
-  // We can't reliably preserve line breaks from mobile HTML, so instead:
-  // try to locate "City, ST" pattern
-  const m = normalizeSpace($td.text()).match(/([A-Za-z .'-]+,\s*[A-Z]{2})/);
-  if (m) return normalizeSpace(m[1]);
-
-  // fallback: just entire text minus title
-  const title = extractTitleFromTournamentCell($td);
-  const all = normalizeSpace($td.text());
-  const cleaned = normalizeSpace(all.replace(title, ""));
-  return cleaned;
-}
-
-export async function runHtmlTable(source: Source): Promise<ProPathEvent[]> {
-  const res = await fetch(source.url, { headers: { "user-agent": "propath-bot" } });
-  if (!res.ok) throw new Error(`html_table fetch failed: ${res.status} ${res.statusText}`);
-
   const html = await res.text();
-  const $ = cheerio.load(html);
+  const $ = load(html);
 
-  const year = extractYearFromPage($ as any, html);
+  // Determine season year (used to convert "Apr 6" → 2026-04-06)
+  const forcedSeasonYear = source.defaults?.seasonYear ? Number(source.defaults.seasonYear) : null;
+  const inferredSeasonYear = inferSeasonYearFromPage(html);
+  const seasonYear = forcedSeasonYear || inferredSeasonYear;
 
   const table = source.tableSelector
     ? $(source.tableSelector).first()
-    : pickBestTable($ as any);
+    : pickBestTable($);
 
-  if (!table.length) throw new Error("html_table: no table found");
+  if (!table.length) {
+    throw new Error("html_table: no table found");
+  }
 
   const rows: ProPathEvent[] = [];
 
-  table.find("tr").each((i: number, tr: any) => {
+  table.find("tr").each((i, tr) => {
     const $tr = $(tr);
     const tds = $tr.find("th,td").toArray();
     if (tds.length < 2) return;
 
-    const dateCell = normalizeSpace($(tds[0]).text());
-    if (i === 0 && /date/i.test(dateCell)) return;
-    if (!looksLikeBlueGolfDateCell(dateCell)) return;
+    const dateCellText = norm($(tds[0]).text());
+    const tournamentCellText = norm($(tds[1]).text());
 
-    // Tournament column (usually 2nd col)
-    const $tourTd = $(tds[1]);
+    // header row guard
+    if (i === 0 && /date/i.test(dateCellText)) return;
+    if (!looksLikeDateCell(dateCellText)) return;
 
-    const title = extractTitleFromTournamentCell($tourTd);
-    if (!title || /^register$/i.test(title)) return;
-
-    // Event detail page link (best available)
-    // Prefer first link that isn't "Register"
-    let eventHref: string | undefined;
-    const links = $tourTd.find("a[href]").toArray();
-    for (const a of links) {
-      const t = normalizeSpace($tourTd.find(a).text());
-      const href = $tourTd.find(a).attr("href") || undefined;
-      if (!href) continue;
-      if (/^register$/i.test(t)) continue;
-      eventHref = href;
-      break;
-    }
-
+    // Event page link: from the tournament cell (not the register link)
+    const eventLink = $(tds[1]).find("a[href]").first();
+    const eventTitleFromLink = norm(eventLink.text());
+    const eventHref = eventLink.attr("href");
     const eventUrl = eventHref ? new URL(eventHref, source.url).toString() : source.url;
 
-    // Signup/Register link (often in first column or inside tour cell)
-    let signupHref: string | undefined;
-    const regLink = $tr.find('a[href*="register"], a[href*="Register"], a:contains("Register")').first();
-    const regHref = regLink.attr("href");
-    if (regHref) signupHref = regHref;
+    // Signup/Register link: usually lives in the date cell
+    // Prefer link whose text contains "Register"; else choose a /secure/ link
+    let signupUrl: string | undefined;
+    const allLinks = $tr.find("a[href]").toArray().map(a => ({
+      text: norm($(a).text()),
+      href: $(a).attr("href") || ""
+    }));
 
-    const signupUrl = signupHref ? new URL(signupHref, source.url).toString() : undefined;
+    const reg = allLinks.find(l => /register/i.test(l.text)) || allLinks.find(l => /secure|gosecure/i.test(l.href));
+    if (reg?.href) signupUrl = new URL(reg.href, source.url).toString();
 
-    // Dates
-    const { start, end } = parseBlueGolfDateRange(dateCell, year);
+    // Title: prefer link text; otherwise fall back to tournament cell text
+    const title = eventTitleFromLink || tournamentCellText;
+    if (!title) return;
 
-    // Location: sometimes in col 3+, sometimes embedded in tournament cell
-    const col2Text = extractLocationFromTournamentCell($tourTd);
-    const locCell = normalizeSpace($(tds[2] ? tds[2] : tds[1]).text());
-    const location = locCell && locCell.length > 2 ? locCell : col2Text;
+    const { start, end } = parseBlueGolfDateCell(dateCellText, seasonYear);
+
+    // Extract city/state from tournament cell
+    const { city, st } = extractCityState(tournamentCellText);
+
+    // Build stable ID
+    const idDate = start || "tbd";
+    const id = `gpro-tour-${slugify(title)}-${idDate}`;
 
     rows.push({
       ...(source.defaults ?? {}),
+      id,
       title,
       start,
       end,
-      state_country: location || "",
+      city: city || undefined,
+      state_country: st || undefined,
       tourUrl: eventUrl,
       signupUrl
     });
   });
 
-  if (!rows.length) throw new Error("html_table: 0 events parsed");
+  if (!rows.length) {
+    throw new Error("html_table: 0 events parsed");
+  }
 
-  // Make IDs deterministic-ish (title + start) so master merge doesn't churn
-  return rows.map((r) => {
-    const slugBase = `${r.tour || ""}-${r.title || ""}-${r.start || ""}`.toLowerCase();
-    const slug = slugBase
-      .replace(/https?:\/\/\S+/g, "")
-      .replace(/[^a-z0-9]+/g, "-")
-      .replace(/^-+|-+$/g, "")
-      .slice(0, 80);
-
-    return { ...r, id: r.id || slug };
-  });
+  return rows;
 }
