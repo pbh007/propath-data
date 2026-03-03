@@ -18,6 +18,9 @@ type ProPathEvent = {
   mondayDate?: string | null;
 };
 
+/* ------------------------------------------------ */
+/* Detect if a cell looks like a date              */
+/* ------------------------------------------------ */
 function looksLikeDateCell(s: string) {
   const t = (s || "").replace(/\s+/g, " ").trim();
   return (
@@ -28,39 +31,36 @@ function looksLikeDateCell(s: string) {
 }
 
 /* ------------------------------------------------ */
-/* BlueGolf season year detection                  */
+/* Extract season year (BlueGolf shows 2026 GPro)  */
 /* ------------------------------------------------ */
 function getSeasonYear($: cheerio.CheerioAPI): number {
   const text = $("body").text().replace(/\s+/g, " ");
-  const m =
+
+  const match =
     text.match(/\b(20\d{2})\s*GPro\b/i) ||
     text.match(/\bSeasons:\s*(20\d{2})\b/i);
 
-  return m ? Number(m[1]) : new Date().getFullYear();
+  return match ? Number(match[1]) : new Date().getFullYear();
 }
 
 /* ------------------------------------------------ */
-/* BlueGolf date parser (handles Mar 25-27, Apr 6) */
+/* Parse BlueGolf date like "Mar 25-27" or "Apr 6" */
 /* ------------------------------------------------ */
 function parseBlueGolfDate(
-  dateText: string,
+  rawDate: string,
   year: number
 ): { start: string | null; end: string | null } {
-  const raw = (dateText || "").replace(/\s+/g, " ").trim();
-  if (!raw) return { start: null, end: null };
+  if (!rawDate) return { start: null, end: null };
 
-  const cleaned = raw
+  const cleaned = rawDate
+    .replace(/\s+/g, " ")
     .split("Register")[0]
     .split("Opens")[0]
     .trim();
 
-  const dash = cleaned.includes("–")
-    ? "–"
-    : cleaned.includes("—")
-    ? "—"
-    : "-";
+  if (!cleaned) return { start: null, end: null };
 
-  // Single day (Apr 6)
+  // Match single day: Apr 6
   const single = cleaned.match(/^([A-Za-z]+)\s+(\d{1,2})$/);
   if (single) {
     return {
@@ -69,7 +69,7 @@ function parseBlueGolfDate(
     };
   }
 
-  // Range (Mar 25-27)
+  // Match range: Mar 25-27
   const range = cleaned.match(
     /^([A-Za-z]+)\s+(\d{1,2})\s*[-–—]\s*(\d{1,2})$/
   );
@@ -85,7 +85,7 @@ function parseBlueGolfDate(
     };
   }
 
-  // Fallback: append year
+  // Fallback: try appending year
   return {
     start: coerceISO(`${cleaned}, ${year}`),
     end: null
@@ -156,7 +156,7 @@ export async function runHtmlTable(source: {
 
   const rows: ProPathEvent[] = [];
 
-  table.find("tr").each((i, tr) => {
+  table.find("tr").each((_, tr) => {
     const $tr = $(tr);
     const tds = $tr.find("td");
 
@@ -169,6 +169,7 @@ export async function runHtmlTable(source: {
 
     if (!looksLikeDateCell(dateCell)) return;
 
+    // Remove nested elements for clean title text
     const titleCell = $(tds[1])
       .clone()
       .children()
@@ -178,16 +179,17 @@ export async function runHtmlTable(source: {
       .replace(/\s+/g, " ")
       .trim();
 
-    if (!titleCell || /register/i.test(titleCell)) return;
+    // Skip pure "Register" rows
+    if (!titleCell || /^register$/i.test(titleCell)) return;
 
     const { start, end } = parseBlueGolfDate(dateCell, seasonYear);
     if (!start) return;
 
-    // Attempt to grab city/state from 2nd cell
+    // Extract city/state like "Brunswick, GA"
     const infoText = $(tds[1]).text();
     const cityMatch = infoText.match(/([A-Za-z\s]+,\s*[A-Z]{2})/);
-    const cityState = cityMatch ? cityMatch[1] : "";
 
+    const cityState = cityMatch ? cityMatch[1] : "";
     const city = cityState ? cityState.split(",")[0].trim() : "";
     const state = cityState ? cityState.split(",")[1].trim() : "";
 
