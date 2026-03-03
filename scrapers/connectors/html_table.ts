@@ -76,8 +76,9 @@ export default function extractEventsFromHtmlTable(
     const { start, end } = parseDateRange(dateText, detectedYear);
     if (!start) return;
 
-    // ✅ Robust BlueGolf fix: regex-scan the FULL flattened text for "City, ST"
-    const { city, state_country } = parseCityStateFromTournamentCell(tournamentCell);
+    // ✅ Robust BlueGolf fix: extract readable text with spaces between nodes,
+    // then pull the last "City, ST" occurrence.
+    const { city, state_country } = parseCityStateFromTournamentCell($, tournamentCell);
 
     const id = makeId(opts.tourName, title, start);
 
@@ -104,7 +105,7 @@ export default function extractEventsFromHtmlTable(
 
 /**
  * IMPORTANT:
- * Your scrapers/run-all.ts expects a NAMED export:
+ * scrapers/run-all.ts expects a NAMED export:
  *   import { runHtmlTable } from "./connectors/html_table.js";
  */
 export async function runHtmlTable(source: any): Promise<EventRow[]> {
@@ -212,22 +213,71 @@ function toISO(year: number, month: number, day: number) {
 }
 
 /**
- * BlueGolf flattens the tournament cell text, but it STILL contains "City, ST".
- * We just find the first occurrence of that pattern and use it.
+ * Cheerio's .text() can glue adjacent elements without spaces.
+ * This walker inserts spaces between nodes so "GCBrunswick" becomes "GC Brunswick".
  */
-function parseCityStateFromTournamentCell(cell: any): { city: string; state_country: string } {
-  if (!cell) return { city: "", state_country: "" };
+function textWithSpaces($: cheerio.CheerioAPI, el: cheerio.Cheerio<any>): string {
+  const root = el.get(0);
+  if (!root) return "";
 
-  // Build a "flattened but readable" text blob
-  const cloned = cell.clone();
-  cloned.find("br").replaceWith(" "); // spacing helps, but we don't rely on line breaks
-  const text = clean(cloned.text());
+  const parts: string[] = [];
 
-  // Find first "City, ST" (multi-word city supported)
-  const m = text.match(/\b([A-Za-z][A-Za-z .'-]{1,60}),\s*([A-Z]{2})\b/);
-  if (!m) return { city: "", state_country: "" };
+  const walk = (node: any) => {
+    if (!node) return;
 
-  return { city: clean(m[1]), state_country: m[2] };
+    // Text node
+    if (node.type === "text") {
+      const t = node.data ?? "";
+      if (t) parts.push(t);
+      return;
+    }
+
+    // Tag node
+    if (node.type === "tag") {
+      const name = (node.name || "").toLowerCase();
+
+      // Treat these as separators
+      if (name === "br" || name === "p" || name === "div" || name === "li" || name === "tr") {
+        parts.push(" ");
+      }
+
+      const children = node.children || [];
+      for (const child of children) walk(child);
+
+      // Add a trailing space after tags so adjacent siblings don't glue
+      parts.push(" ");
+    }
+  };
+
+  walk(root);
+
+  return clean(parts.join(" "));
+}
+
+/**
+ * Pull the LAST "City, ST" match from the tournament cell.
+ * (Safer than first, and works even if there are other "X, ST" strings earlier.)
+ */
+function parseCityStateFromTournamentCell(
+  $: cheerio.CheerioAPI,
+  cell: cheerio.Cheerio<any>
+): { city: string; state_country: string } {
+  const text = textWithSpaces($, cell);
+  if (!text) return { city: "", state_country: "" };
+
+  // Global match for "City, ST"
+  const re = /\b([A-Za-z][A-Za-z .'-]{1,60}),\s*([A-Z]{2})\b/g;
+
+  let lastCity = "";
+  let lastState = "";
+
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text)) !== null) {
+    lastCity = clean(m[1]);
+    lastState = m[2];
+  }
+
+  return { city: lastCity, state_country: lastState };
 }
 
 function makeId(tour: string, title: string, start: string) {
