@@ -47,7 +47,9 @@ export default function extractEventsFromHtmlTable(
       return match ? Number(match[1]) : new Date().getFullYear();
     })();
 
-  const table = opts.tableSelector ? $(opts.tableSelector).first() : $("table").first();
+  const table = opts.tableSelector
+    ? $(opts.tableSelector).first()
+    : $("table").first();
   if (!table || table.length === 0) return [];
 
   const rows: EventRow[] = [];
@@ -77,6 +79,9 @@ export default function extractEventsFromHtmlTable(
     const { start, end } = parseDateRange(dateText, detectedYear);
     if (!start) return;
 
+    // ✅ Single-day fix: if end missing, set end = start
+    const finalEnd = end && end.trim() ? end : start;
+
     // ✅ BlueGolf fix: parse city/state from the *line* that contains "City, ST"
     const { city, state_country } = parseCityStateFromTournamentCell(tournamentCell);
 
@@ -90,7 +95,7 @@ export default function extractEventsFromHtmlTable(
       stage: "",
       title,
       start,
-      end: end || "",
+      end: finalEnd,
       city: city || "",
       state_country: state_country || "",
       tourUrl: eventUrl,
@@ -120,7 +125,9 @@ export async function runHtmlTable(source: any): Promise<EventRow[]> {
   });
 
   if (!res.ok) {
-    throw new Error(`HTML table fetch failed: ${res.status} ${res.statusText} (${url})`);
+    throw new Error(
+      `HTML table fetch failed: ${res.status} ${res.statusText} (${url})`
+    );
   }
 
   const html = await res.text();
@@ -177,7 +184,9 @@ function findSignupUrlInRow(row: any, base?: string) {
 function parseDateRange(text: string, year: number) {
   if (!text) return {};
 
-  const m = text.match(/\b([A-Za-z]{3,})\s+(\d{1,2})(?:\s*[-–]\s*(\d{1,2}))?\b/);
+  const m = text.match(
+    /\b([A-Za-z]{3,})\s+(\d{1,2})(?:\s*[-–]\s*(\d{1,2}))?\b/
+  );
   if (!m) return {};
 
   const month = monthToNumber(m[1]);
@@ -209,14 +218,20 @@ function monthToNumber(name: string) {
 }
 
 function toISO(year: number, month: number, day: number) {
-  return `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+  return `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(
+    2,
+    "0"
+  )}`;
 }
 
 /**
  * Pull city/state from the line that looks like: "Brunswick, GA"
  * BlueGolf renders course/city as separate lines (with <br>), so we preserve that.
  */
-function parseCityStateFromTournamentCell(cell: any): { city: string; state_country: string } {
+function parseCityStateFromTournamentCell(cell: any): {
+  city: string;
+  state_country: string;
+} {
   const html = (cell.html?.() || "").toString();
   if (!html) return { city: "", state_country: "" };
 
