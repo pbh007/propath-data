@@ -60,13 +60,14 @@ function slug(s: string) {
 }
 
 function makeStableId(e: ProPathEvent): string {
-  // stable enough: tour + start + title + city
   return [
     slug(e.tour || "unknown-tour"),
     e.start || "tbd",
     slug(e.title || "event"),
     slug(e.city || ""),
-  ].filter(Boolean).join("-");
+  ]
+    .filter(Boolean)
+    .join("-");
 }
 
 function normalizeRow(r: any): ProPathEvent {
@@ -101,23 +102,30 @@ function parseCsvToEvents(csvText: string): ProPathEvent[] {
   return rows.map(normalizeRow);
 }
 
-function mergeById(existing: ProPathEvent[], incoming: ProPathEvent[]): ProPathEvent[] {
-  const map = new Map<string, ProPathEvent>();
+function todayISO(): string {
+  // Use LOCAL date for “past vs upcoming” split
+  const d = new Date();
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
 
-  // Existing first (preserve past events)
-  for (const e of existing) {
+function isUpcoming(e: ProPathEvent): boolean {
+  const t = todayISO();
+  const s = (e.start || "").toString().slice(0, 10);
+  if (!s) return true; // treat unknown start as upcoming so it gets cleaned out
+  return s >= t;
+}
+
+function mergeDedupeById(events: ProPathEvent[]): ProPathEvent[] {
+  const map = new Map<string, ProPathEvent>();
+  for (const e of events) {
     const id = e.id || makeStableId(e);
+    // last write wins (fine after we’ve removed upcoming for a tour)
     map.set(id, { ...e, id });
   }
 
-  // Incoming overrides/updates by id
-  for (const e of incoming) {
-    const id = e.id || makeStableId(e);
-    const prev = map.get(id) || {};
-    map.set(id, { ...prev, ...e, id });
-  }
-
-  // Sort by start date (nulls at end)
   const out = Array.from(map.values());
   out.sort((a, b) => {
     const as = a.start || "9999-12-31";
@@ -154,7 +162,6 @@ async function runSource(s: Source): Promise<boolean> {
       return false;
     }
 
-    // Ensure output is under data/
     if (!s.output.startsWith("data/")) {
       console.log(`⚠ ${s.name}: output MUST start with "data/". Currently: ${s.output}`);
       return false;
@@ -163,7 +170,6 @@ async function runSource(s: Source): Promise<boolean> {
     writeEventsCsv(s.output, events as any);
     console.log(`✓ ${s.name}: ${events.length} events written to ${s.output}.`);
     return true;
-
   } catch (err) {
     console.error(`✖ ${s.name} failed:`);
     console.error(err);
@@ -171,17 +177,25 @@ async function runSource(s: Source): Promise<boolean> {
   }
 }
 
+/**
+ * Merge rule:
+ * - Keep ALL past events forever
+ * - For each tour that appears in incoming:
+ *     replace UPCOMING rows for that tour with the incoming rows
+ *   (this deletes junk future rows)
+ * - If incoming is empty, do nothing
+ */
 function mergeIncomingMiniTourMaster() {
   const dataDir = path.resolve("data");
   const masterPath = path.join(dataDir, "ProPath-MiniTour2026-MasterEvents.csv");
 
-  // Read existing master
   const existingCsv = safeRead(masterPath);
   const existing = parseCsvToEvents(existingCsv);
 
-  // Read all incoming staging files
   const incomingFiles = fs.existsSync(dataDir)
-    ? fs.readdirSync(dataDir).filter((f) => f.startsWith("_incoming_") && f.endsWith(".csv"))
+    ? fs
+        .readdirSync(dataDir)
+        .filter((f) => f.startsWith("_incoming_") && f.endsWith(".csv"))
     : [];
 
   const incomingAll: ProPathEvent[] = [];
@@ -197,12 +211,37 @@ function mergeIncomingMiniTourMaster() {
     return;
   }
 
-  const merged = mergeById(existing, incomingAll);
+  // Group incoming by tour (so each tour can be authoritative for UPCOMING)
+  const incomingByTour = new Map<string, ProPathEvent[]>();
+  for (const e of incomingAll) {
+    const tour = (e.tour || "").trim();
+    if (!tour) continue;
+    if (!incomingByTour.has(tour)) incomingByTour.set(tour, []);
+    incomingByTour.get(tour)!.push(e);
+  }
 
-  // Write merged back to master using your existing writer (keeps headers consistent)
-  writeEventsCsv("data/ProPath-MiniTour2026-MasterEvents.csv", merged as any);
+  let merged = existing;
 
-  console.log(`✓ MiniTour master updated: ${merged.length} total rows`);
+  for (const [tour, incomingForTour] of incomingByTour.entries()) {
+    if (!incomingForTour.length) continue;
+
+    // Remove UPCOMING rows in master for that tour (wipes junk, keeps past)
+    merged = merged.filter((e) => {
+      const sameTour = (e.tour || "").trim() === tour;
+      if (!sameTour) return true;
+      // keep past rows; remove upcoming rows
+      return !isUpcoming(e);
+    });
+
+    // Add the new incoming rows for that tour
+    merged = merged.concat(incomingForTour);
+  }
+
+  // Dedupe and sort
+  const finalRows = mergeDedupeById(merged);
+
+  writeEventsCsv("data/ProPath-MiniTour2026-MasterEvents.csv", finalRows as any);
+  console.log(`✓ MiniTour master updated: ${finalRows.length} total rows`);
 }
 
 async function main() {
@@ -229,7 +268,6 @@ async function main() {
     throw new Error("All sources failed.");
   }
 
-  // ✅ merge staging mini tour updates into the real master file your app reads
   mergeIncomingMiniTourMaster();
 
   console.log(`\nComplete. ${successCount}/${sources.length} sources succeeded.`);
