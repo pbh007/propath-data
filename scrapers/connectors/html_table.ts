@@ -18,83 +18,14 @@ type ProPathEvent = {
   mondayDate?: string | null;
 };
 
-/* ------------------------------------------------ */
-/* Detect if a cell looks like a date              */
-/* ------------------------------------------------ */
 function looksLikeDateCell(s: string) {
   const t = (s || "").replace(/\s+/g, " ").trim();
   return (
-    /\b20\d{2}\b/.test(t) ||
     /^\d{4}-\d{2}-\d{2}$/.test(t) ||
     /\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\b/i.test(t)
   );
 }
 
-/* ------------------------------------------------ */
-/* Extract season year (BlueGolf shows 2026 GPro)  */
-/* ------------------------------------------------ */
-function getSeasonYear($: cheerio.CheerioAPI): number {
-  const text = $("body").text().replace(/\s+/g, " ");
-
-  const match =
-    text.match(/\b(20\d{2})\s*GPro\b/i) ||
-    text.match(/\bSeasons:\s*(20\d{2})\b/i);
-
-  return match ? Number(match[1]) : new Date().getFullYear();
-}
-
-/* ------------------------------------------------ */
-/* Parse BlueGolf date like "Mar 25-27" or "Apr 6" */
-/* ------------------------------------------------ */
-function parseBlueGolfDate(
-  rawDate: string,
-  year: number
-): { start: string | null; end: string | null } {
-  if (!rawDate) return { start: null, end: null };
-
-  const cleaned = rawDate
-    .replace(/\s+/g, " ")
-    .split("Register")[0]
-    .split("Opens")[0]
-    .trim();
-
-  if (!cleaned) return { start: null, end: null };
-
-  // Match single day: Apr 6
-  const single = cleaned.match(/^([A-Za-z]+)\s+(\d{1,2})$/);
-  if (single) {
-    return {
-      start: coerceISO(`${single[1]} ${single[2]}, ${year}`),
-      end: null
-    };
-  }
-
-  // Match range: Mar 25-27
-  const range = cleaned.match(
-    /^([A-Za-z]+)\s+(\d{1,2})\s*[-–—]\s*(\d{1,2})$/
-  );
-
-  if (range) {
-    const mon = range[1];
-    const d1 = range[2];
-    const d2 = range[3];
-
-    return {
-      start: coerceISO(`${mon} ${d1}, ${year}`),
-      end: coerceISO(`${mon} ${d2}, ${year}`)
-    };
-  }
-
-  // Fallback: try appending year
-  return {
-    start: coerceISO(`${cleaned}, ${year}`),
-    end: null
-  };
-}
-
-/* ------------------------------------------------ */
-/* Smart table picker                              */
-/* ------------------------------------------------ */
 function pickBestTable($: cheerio.CheerioAPI) {
   let best = $("table").first();
   let bestScore = -1;
@@ -122,9 +53,6 @@ function pickBestTable($: cheerio.CheerioAPI) {
   return best;
 }
 
-/* ------------------------------------------------ */
-/* MAIN CONNECTOR                                  */
-/* ------------------------------------------------ */
 export async function runHtmlTable(source: {
   url: string;
   defaults?: Record<string, string>;
@@ -136,15 +64,19 @@ export async function runHtmlTable(source: {
   });
 
   if (!res.ok) {
-    throw new Error(
-      `html_table fetch failed: ${res.status} ${res.statusText}`
-    );
+    throw new Error(`html_table fetch failed: ${res.status} ${res.statusText}`);
   }
 
   const html = await res.text();
   const $ = cheerio.load(html);
 
-  const seasonYear = getSeasonYear($);
+  /* ================= DEBUG ================= */
+  console.log("========== GPRO DEBUG ==========");
+  console.log("HTML length:", html.length);
+  console.log("Contains HERITAGE:", html.toUpperCase().includes("HERITAGE"));
+  console.log("Table count:", $("table").length);
+  console.log("================================");
+  /* ========================================= */
 
   const table = source.tableSelector
     ? $(source.tableSelector).first()
@@ -169,45 +101,18 @@ export async function runHtmlTable(source: {
 
     if (!looksLikeDateCell(dateCell)) return;
 
-    // Remove nested elements for clean title text
     const titleCell = $(tds[1])
-      .clone()
-      .children()
-      .remove()
-      .end()
       .text()
       .replace(/\s+/g, " ")
       .trim();
 
-    // Skip pure "Register" rows
     if (!titleCell || /^register$/i.test(titleCell)) return;
-
-    const { start, end } = parseBlueGolfDate(dateCell, seasonYear);
-    if (!start) return;
-
-    // Extract city/state like "Brunswick, GA"
-    const infoText = $(tds[1]).text();
-    const cityMatch = infoText.match(/([A-Za-z\s]+,\s*[A-Z]{2})/);
-
-    const cityState = cityMatch ? cityMatch[1] : "";
-    const city = cityState ? cityState.split(",")[0].trim() : "";
-    const state = cityState ? cityState.split(",")[1].trim() : "";
-
-    const state_country = state ? `${state}, USA` : "";
-
-    const href = $(tds[1]).find("a[href]").first().attr("href");
-    const eventUrl = href
-      ? new URL(href, source.url).toString()
-      : source.url;
 
     rows.push({
       ...(source.defaults ?? {}),
       title: titleCell,
-      start,
-      end,
-      city,
-      state_country,
-      tourUrl: eventUrl
+      start: null,
+      end: null
     });
   });
 
