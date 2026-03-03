@@ -27,6 +27,12 @@ export type HtmlTableOptions = {
   gender?: string;
 };
 
+/**
+ * Extract events from an HTML table where:
+ * - date is in col 1
+ * - tournament details (title, course, city/state) are in col 2
+ * - register link may be anywhere in the row
+ */
 export default function extractEventsFromHtmlTable(
   html: string,
   opts: HtmlTableOptions
@@ -47,14 +53,12 @@ export default function extractEventsFromHtmlTable(
   const rows: EventRow[] = [];
 
   table.find("tr").each((_, tr) => {
-    const tds = $(tr).find("td");
+    const $tr = $(tr);
+    const tds = $tr.find("td");
     if (tds.length < 2) return;
 
-    // BlueGolf upcoming tables are typically:
-    // [0]=date, [1]=tournament/event (contains link), [2]=location, [3+]=other links
     const dateText = clean(tds.eq(0).text());
     const tournamentCell = tds.eq(1);
-    const locationCell = tds.length >= 3 ? tds.eq(2) : null;
 
     const title =
       clean(tournamentCell.find("b,strong").first().text()) ||
@@ -67,13 +71,15 @@ export default function extractEventsFromHtmlTable(
     const eventUrl = findEventUrl(tournamentCell, opts.baseUrl);
     if (!eventUrl) return;
 
-    const signupUrl = findSignupUrlInRow($(tr), opts.baseUrl);
+    const signupUrl = findSignupUrlInRow($tr, opts.baseUrl);
 
     const { start, end } = parseDateRange(dateText, detectedYear);
     if (!start) return;
 
-    const locationText = locationCell ? clean(locationCell.text()) : clean(tournamentCell.text());
-    const { city, state_country } = parseCityStateFromLocation(locationText);
+    // ✅ Key fix for BlueGolf-style tables:
+    // Tournament cell contains multiple lines separated by <br>
+    // We convert <br> -> "\n", then grab the line that matches "City, ST"
+    const { city, state_country } = parseCityStateFromTournamentCell(tournamentCell);
 
     const id = makeId(opts.tourName, title, start);
 
@@ -99,7 +105,8 @@ export default function extractEventsFromHtmlTable(
 }
 
 /**
- * run-all.ts expects:
+ * IMPORTANT:
+ * Your scrapers/run-all.ts expects a NAMED export:
  *   import { runHtmlTable } from "./connectors/html_table.js";
  */
 export async function runHtmlTable(source: any): Promise<EventRow[]> {
@@ -109,7 +116,7 @@ export async function runHtmlTable(source: any): Promise<EventRow[]> {
   const res = await fetch(url, {
     headers: {
       "User-Agent": "propath-data-scraper/1.0",
-      "Accept": "text/html,application/xhtml+xml",
+      Accept: "text/html,application/xhtml+xml",
     },
   });
 
@@ -158,7 +165,6 @@ function findEventUrl(cell: any, base?: string) {
   return null;
 }
 
-// More robust: scan the entire row for the signup link (BlueGolf moves columns around)
 function findSignupUrlInRow(row: any, base?: string) {
   const links = row.find("a").toArray();
   for (const link of links) {
@@ -207,20 +213,27 @@ function toISO(year: number, month: number, day: number) {
   return `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
 }
 
-// Pull ONLY the first "City, ST" from the location cell (ignores course names etc)
-function parseCityStateFromLocation(text: string) {
-  // Example: "Brunswick, GA Heritage Oaks GC"
-  const m = text.match(/^\s*([^,]+),\s*([A-Z]{2})\b/);
-  if (m) {
-    return { city: clean(m[1]), state_country: m[2] };
-  }
+function parseCityStateFromTournamentCell(cell: any): { city: string; state_country: string } {
+  if (!cell) return { city: "", state_country: "" };
 
-  const anywhere = text.match(/\b([^,]+),\s*([A-Z]{2})\b/);
-  if (anywhere) {
-    return { city: clean(anywhere[1]), state_country: anywhere[2] };
-  }
+  // Clone so we can safely mutate <br> tags
+  const cloned = cell.clone();
 
-  return {};
+  // Convert <br> into newlines so text keeps line structure
+  cloned.find("br").replaceWith("\n");
+
+  // Get lines, trimmed
+  const raw = (cloned.text() || "").split("\n").map((x: string) => clean(x)).filter(Boolean);
+
+  // Find the first line that looks like "City, ST"
+  // e.g. "Brunswick, GA" or "Jekyll Island, GA"
+  const locLine = raw.find((line: string) => /\b[^,]{2,},\s*[A-Z]{2}\b/.test(line));
+  if (!locLine) return { city: "", state_country: "" };
+
+  const m = locLine.match(/^(.+?),\s*([A-Z]{2})\b/);
+  if (!m) return { city: "", state_country: "" };
+
+  return { city: clean(m[1]), state_country: m[2] };
 }
 
 function makeId(tour: string, title: string, start: string) {
