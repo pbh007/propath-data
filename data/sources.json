@@ -6,5 +6,17 @@
     "url": "https://www.minorleaguegolf.com/index_events.asp",
     "output": "data/_incoming_mlgt_upcoming.csv",
     "defaults": { "tour": "Minor League Golf Tour", "gender": "Men" }
+  },
+  {
+    "id": "gpro_upcoming",
+    "name": "GPro Tour (Upcoming)",
+    "connector": "html_table",
+    "url": "https://gprotour.bluegolf.com/bluegolf/gprotour/schedule/upcoming.htm",
+    "output": "data/_incoming_gpro.csv",
+    "defaults": {
+      "tour": "GPro Tour",
+      "type": "Event"
+    },
+    "tableSelector": "table"
   }
 ]
