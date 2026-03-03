@@ -20,17 +20,10 @@ type ProPathEvent = {
 };
 
 function norm(s: string) {
-  return (s || "").replace(/\u00a0/g, " ").replace(/\s+/g, " ").trim();
-}
-
-function cellLines($: ReturnType<typeof load>, el: any): string[] {
-  // Cheerio keeps line breaks from <br> etc in many tables; splitting gives us clean “rows”
-  const raw = $(el).text() || "";
-  return raw
+  return (s || "")
     .replace(/\u00a0/g, " ")
-    .split(/\r?\n+/)
-    .map(s => s.trim())
-    .filter(Boolean);
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 function looksLikeDateToken(s: string) {
@@ -38,17 +31,48 @@ function looksLikeDateToken(s: string) {
   return /\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\b/i.test(t);
 }
 
-function extractDateTokenFromCell(lines: string[], fallbackText: string): string {
-  // Prefer a line that looks like "Mar 25-27" / "Apr 6" / "Apr 8-10"
-  const pick = lines.find(looksLikeDateToken);
-  if (pick) return norm(pick);
+/**
+ * Pull a clean BlueGolf date token out of messy text.
+ * Handles:
+ *  - "Mar 25-27 Register"
+ *  - "Apr 8-10"
+ *  - "Apr 6"
+ *  - "Nov 30-Dec 2"
+ */
+function extractCleanDateToken(text: string): string {
+  const t = norm(text);
 
-  // Fallback: search inside the flattened cell text for a month/day token
-  const t = norm(fallbackText);
-  const m = t.match(
-    /\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\b\s+\d{1,2}(?:\s*[-–—]\s*(?:\d{1,2}|\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\b\s+\d{1,2}))?/i
+  // "Nov 30-Dec 2"
+  const cross = t.match(
+    /\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\b\s+\d{1,2}\s*[-–—]\s*\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\b\s+\d{1,2}\b/i
   );
-  return m ? norm(m[0]) : t;
+  if (cross) return norm(cross[0]);
+
+  // "Mar 25-27" OR "Apr 8-10"
+  const range = t.match(
+    /\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\b\s+\d{1,2}\s*[-–—]\s*\d{1,2}\b/i
+  );
+  if (range) return norm(range[0]);
+
+  // "Apr 6"
+  const single = t.match(
+    /\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\b\s+\d{1,2}\b/i
+  );
+  if (single) return norm(single[0]);
+
+  return t;
+}
+
+function cellLines($: ReturnType<typeof load>, el: any): string[] {
+  // BlueGolf uses a middle dot "·" between course and city/state, so split on that too.
+  const raw = ($(el).text() || "")
+    .replace(/\u00a0/g, " ")
+    .replace(/·/g, "\n");
+
+  return raw
+    .split(/\r?\n+/)
+    .map(s => s.trim())
+    .filter(Boolean);
 }
 
 function slugify(s: string) {
@@ -60,34 +84,21 @@ function slugify(s: string) {
     .replace(/^-|-$/g, "");
 }
 
-/**
- * Try to infer the season year from the page UI ("2026 GPro").
- * If not found, you can force it via source.defaults.seasonYear.
- */
 function inferSeasonYearFromHtml(htmlText: string): number | null {
-  // Prefer the explicit selector text "2026 GPro" if present
+  // Prefer "2026 GPro" in the UI
   const m1 = htmlText.match(/\b(20\d{2})\b\s*GPro\b/i);
   if (m1) {
     const yr = Number(m1[1]);
     return Number.isFinite(yr) ? yr : null;
   }
-  // Otherwise, look for a "2026" near "Upcoming" chunk (best-effort)
-  const m2 = htmlText.match(/\b(20\d{2})\b/);
-  if (!m2) return null;
-  const yr = Number(m2[1]);
-  return Number.isFinite(yr) ? yr : null;
+  return null;
 }
 
-/**
- * Parse BlueGolf date token like:
- * - "Mar 25-27"
- * - "Apr 6"
- * - "Apr 8-10"
- * - "Nov 30-Dec 2"
- */
 function parseBlueGolfDateToken(token: string, seasonYear: number | null): { start: string | null; end: string | null } {
-  const raw = norm(token);
-  if (!raw || !seasonYear) return { start: null, end: null };
+  if (!seasonYear) return { start: null, end: null };
+
+  const raw = extractCleanDateToken(token);
+  if (!raw || !looksLikeDateToken(raw)) return { start: null, end: null };
 
   // "Nov 30-Dec 2"
   const cross = raw.match(/^([A-Za-z]+)\s+(\d{1,2})\s*[-–—]\s*([A-Za-z]+)\s+(\d{1,2})$/i);
@@ -116,7 +127,7 @@ function parseBlueGolfDateToken(token: string, seasonYear: number | null): { sta
     };
   }
 
-  // last resort
+  // last resort (rare)
   return { start: coerceISO(raw), end: null };
 }
 
@@ -181,20 +192,21 @@ export async function runHtmlTable(source: {
     const tds = $tr.find("th,td").toArray();
     if (tds.length < 2) return;
 
-    const dateLines = cellLines($, tds[0]);
-    const tourLines = cellLines($, tds[1]);
-
     const dateCellFlat = norm($(tds[0]).text());
     const tourCellFlat = norm($(tds[1]).text());
 
     if (i === 0 && /date/i.test(dateCellFlat)) return;
 
-    const dateToken = extractDateTokenFromCell(dateLines, dateCellFlat);
+    // Date token (cleaned)
+    const dateToken = extractCleanDateToken(dateCellFlat);
     if (!looksLikeDateToken(dateToken)) return;
 
     const { start, end } = parseBlueGolfDateToken(dateToken, seasonYear);
 
-    // Event link + title live in the tournament cell
+    // Tournament lines (split on "·" as well)
+    const tourLines = cellLines($, tds[1]);
+
+    // Event link + title
     const eventLink = $(tds[1]).find("a[href]").first();
     const eventTitleFromLink = norm(eventLink.text());
     const eventHref = eventLink.attr("href");
@@ -203,8 +215,11 @@ export async function runHtmlTable(source: {
     const title = eventTitleFromLink || tourLines[0] || tourCellFlat;
     if (!title) return;
 
-    // City/state line is typically its own line ("Brunswick, GA")
-    const cityStateLine = tourLines.find(l => /,\s*[A-Z]{2}\b/.test(l)) || "";
+    // City/state line: prefer a clean line like "Brunswick, GA"
+    const cityStateLine =
+      tourLines.find(l => /,\s*[A-Z]{2}\b/.test(l)) ||
+      (tourCellFlat.replace(/·/g, " ").match(/([A-Za-z .'-]+),\s*([A-Z]{2})\b/)?.[0] ?? "");
+
     let city: string | undefined;
     let state_country: string | undefined;
     const m = cityStateLine.match(/^(.+?),\s*([A-Z]{2})\b/);
@@ -213,7 +228,7 @@ export async function runHtmlTable(source: {
       state_country = m[2];
     }
 
-    // Register link (signup) is in the date cell on BlueGolf schedule
+    // Register link (signup) usually in the date cell
     let signupUrl: string | undefined;
     const allLinks = $tr.find("a[href]").toArray().map(a => ({
       text: norm($(a).text()),
