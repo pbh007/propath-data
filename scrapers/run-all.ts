@@ -29,7 +29,7 @@ type Source = {
   name: string;
   connector: "json_api" | "html_table" | "html_blocks";
   url: string;
-  output: string; // IMPORTANT: should be under data/
+  output: string;
   defaults?: Record<string, string>;
   tableSelector?: string;
 };
@@ -95,15 +95,11 @@ function normalizeRow(r: any): ProPathEvent {
 function parseCsvToEvents(csvText: string): ProPathEvent[] {
   if (!csvText.trim()) return [];
   const parsed = Papa.parse(csvText, { header: true, skipEmptyLines: "greedy" });
-  if (parsed.errors?.length) {
-    console.log("CSV parse warnings:", parsed.errors.slice(0, 3));
-  }
   const rows = (parsed.data as any[]).filter(Boolean);
   return rows.map(normalizeRow);
 }
 
 function todayISO(): string {
-  // Use LOCAL date for “past vs upcoming” split
   const d = new Date();
   const y = d.getFullYear();
   const m = String(d.getMonth() + 1).padStart(2, "0");
@@ -111,80 +107,81 @@ function todayISO(): string {
   return `${y}-${m}-${day}`;
 }
 
-function isUpcoming(e: ProPathEvent): boolean {
-  const t = todayISO();
-  const s = (e.start || "").toString().slice(0, 10);
-  if (!s) return true; // treat unknown start as upcoming so it gets cleaned out
-  return s >= t;
+function isUpcoming(start?: string | null): boolean {
+  const s = (start || "").slice(0, 10);
+  if (!s) return true;
+  return s >= todayISO();
 }
 
-function mergeDedupeById(events: ProPathEvent[]): ProPathEvent[] {
+function replaceUpcomingByTour(masterRows: ProPathEvent[], incomingRows: ProPathEvent[]) {
+  const incomingByTour = new Map<string, ProPathEvent[]>();
+
+  for (const r of incomingRows) {
+    const tour = String(r.tour || "").trim();
+    if (!tour) continue;
+    if (!incomingByTour.has(tour)) incomingByTour.set(tour, []);
+    incomingByTour.get(tour)!.push(r);
+  }
+
+  if (incomingByTour.size === 0) return masterRows;
+
+  let out = masterRows;
+
+  for (const [tour, rows] of incomingByTour.entries()) {
+    if (!rows.length) continue;
+
+    // Remove UPCOMING rows for that tour
+    out = out.filter((m) => {
+      const sameTour = String(m.tour || "").trim() === tour;
+      if (!sameTour) return true;
+      return !isUpcoming(m.start);
+    });
+
+    // Add new upcoming rows
+    out = out.concat(rows);
+  }
+
+  return out;
+}
+
+function dedupeAndSort(rows: ProPathEvent[]) {
   const map = new Map<string, ProPathEvent>();
-  for (const e of events) {
-    const id = e.id || makeStableId(e);
-    // last write wins (fine after we’ve removed upcoming for a tour)
-    map.set(id, { ...e, id });
+
+  for (const r of rows) {
+    const id = r.id || makeStableId(r);
+    map.set(id, { ...r, id });
   }
 
   const out = Array.from(map.values());
+
   out.sort((a, b) => {
     const as = a.start || "9999-12-31";
     const bs = b.start || "9999-12-31";
     return as.localeCompare(bs);
   });
+
   return out;
 }
 
 async function runSource(s: Source): Promise<boolean> {
-  console.log(`\n=== ${s.name} (${s.connector}) ===`);
+  if (!isValidUrl(s.url)) return false;
 
-  if (!isValidUrl(s.url)) {
-    console.log(`⚠ Skipping ${s.name}: invalid or placeholder URL.`);
-    return false;
+  let events: ProPathEvent[] = [];
+
+  if (s.connector === "json_api") {
+    events = await runJsonApi(s as any);
+  } else if (s.connector === "html_table") {
+    events = await runHtmlTable(s as any);
+  } else if (s.connector === "html_blocks") {
+    events = await runHtmlBlocks(s as any);
   }
 
-  try {
-    let events: ProPathEvent[] = [];
+  if (!events.length) return false;
 
-    if (s.connector === "json_api") {
-      events = await runJsonApi(s as any);
-    } else if (s.connector === "html_table") {
-      events = await runHtmlTable(s as any);
-    } else if (s.connector === "html_blocks") {
-      events = await runHtmlBlocks(s as any);
-    } else {
-      console.log(`⚠ Unknown connector for ${s.name}, skipping.`);
-      return false;
-    }
-
-    if (!events || !events.length) {
-      console.log(`⚠ ${s.name}: 0 events returned. Skipping write.`);
-      return false;
-    }
-
-    if (!s.output.startsWith("data/")) {
-      console.log(`⚠ ${s.name}: output MUST start with "data/". Currently: ${s.output}`);
-      return false;
-    }
-
-    writeEventsCsv(s.output, events as any);
-    console.log(`✓ ${s.name}: ${events.length} events written to ${s.output}.`);
-    return true;
-  } catch (err) {
-    console.error(`✖ ${s.name} failed:`);
-    console.error(err);
-    return false;
-  }
+  writeEventsCsv(s.output, events as any);
+  return true;
 }
 
-/**
- * Merge rule:
- * - Keep ALL past events forever
- * - For each tour that appears in incoming:
- *     replace UPCOMING rows for that tour with the incoming rows
- *   (this deletes junk future rows)
- * - If incoming is empty, do nothing
- */
 function mergeIncomingMiniTourMaster() {
   const dataDir = path.resolve("data");
   const masterPath = path.join(dataDir, "ProPath-MiniTour2026-MasterEvents.csv");
@@ -193,88 +190,41 @@ function mergeIncomingMiniTourMaster() {
   const existing = parseCsvToEvents(existingCsv);
 
   const incomingFiles = fs.existsSync(dataDir)
-    ? fs
-        .readdirSync(dataDir)
-        .filter((f) => f.startsWith("_incoming_") && f.endsWith(".csv"))
+    ? fs.readdirSync(dataDir).filter((f) => f.startsWith("_incoming_") && f.endsWith(".csv"))
     : [];
 
   const incomingAll: ProPathEvent[] = [];
+
   for (const f of incomingFiles) {
-    const p = path.join(dataDir, f);
-    const csv = safeRead(p);
+    const csv = safeRead(path.join(dataDir, f));
     const events = parseCsvToEvents(csv);
     incomingAll.push(...events);
   }
 
   if (!incomingAll.length) {
-    console.log("⚠ No incoming mini-tour events found (data/_incoming_*.csv). Merge skipped.");
+    console.log("No incoming files — merge skipped.");
     return;
   }
 
-  // Group incoming by tour (so each tour can be authoritative for UPCOMING)
-  const incomingByTour = new Map<string, ProPathEvent[]>();
-  for (const e of incomingAll) {
-    const tour = (e.tour || "").trim();
-    if (!tour) continue;
-    if (!incomingByTour.has(tour)) incomingByTour.set(tour, []);
-    incomingByTour.get(tour)!.push(e);
-  }
-
-  let merged = existing;
-
-  for (const [tour, incomingForTour] of incomingByTour.entries()) {
-    if (!incomingForTour.length) continue;
-
-    // Remove UPCOMING rows in master for that tour (wipes junk, keeps past)
-    merged = merged.filter((e) => {
-      const sameTour = (e.tour || "").trim() === tour;
-      if (!sameTour) return true;
-      // keep past rows; remove upcoming rows
-      return !isUpcoming(e);
-    });
-
-    // Add the new incoming rows for that tour
-    merged = merged.concat(incomingForTour);
-  }
-
-  // Dedupe and sort
-  const finalRows = mergeDedupeById(merged);
+  const replaced = replaceUpcomingByTour(existing, incomingAll);
+  const finalRows = dedupeAndSort(replaced);
 
   writeEventsCsv("data/ProPath-MiniTour2026-MasterEvents.csv", finalRows as any);
-  console.log(`✓ MiniTour master updated: ${finalRows.length} total rows`);
+  console.log(`MiniTour master updated: ${finalRows.length} rows`);
 }
 
 async function main() {
   const sourcesPath = path.resolve("data", "sources.json");
-
-  if (!fs.existsSync(sourcesPath)) {
-    throw new Error("sources.json not found in data folder.");
-  }
-
   const sources = JSON.parse(fs.readFileSync(sourcesPath, "utf8")) as Source[];
 
-  if (!Array.isArray(sources) || !sources.length) {
-    throw new Error("sources.json is empty or invalid.");
-  }
-
-  let successCount = 0;
-
   for (const s of sources) {
-    const ok = await runSource(s);
-    if (ok) successCount++;
-  }
-
-  if (successCount === 0) {
-    throw new Error("All sources failed.");
+    await runSource(s);
   }
 
   mergeIncomingMiniTourMaster();
-
-  console.log(`\nComplete. ${successCount}/${sources.length} sources succeeded.`);
 }
 
 main().catch((err) => {
-  console.error("\nScraper failed:");
-  console.error(err);
+  console.error("Scraper failed:", err);
   process.exit(1);
 });
