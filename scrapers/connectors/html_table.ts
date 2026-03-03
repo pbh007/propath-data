@@ -52,7 +52,8 @@ export default function extractEventsFromHtmlTable(
 
   const rows: EventRow[] = [];
 
-  table.find("tr").each((_, tr) => {
+  // ✅ TS fix: explicitly type callback params
+  table.find("tr").each((_: number, tr: any) => {
     const $tr = $(tr);
     const tds = $tr.find("td");
     if (tds.length < 2) return;
@@ -154,7 +155,7 @@ function resolve(url: string, base?: string) {
 }
 
 function findEventUrl(cell: any, base?: string) {
-  const links = cell.find("a").toArray();
+  const links = (cell.find("a").toArray() || []) as any[];
   for (const link of links) {
     const href = link.attribs?.href;
     if (!href) continue;
@@ -164,7 +165,7 @@ function findEventUrl(cell: any, base?: string) {
 }
 
 function findSignupUrlInRow(row: any, base?: string) {
-  const links = row.find("a").toArray();
+  const links = (row.find("a").toArray() || []) as any[];
   for (const link of links) {
     const href = link.attribs?.href;
     if (!href) continue;
@@ -227,11 +228,10 @@ function parseCityStateFromTournamentCell(cell: any): { city: string; state_coun
 
   const lines = withNewlines
     .split("\n")
-    .map((l) => clean(l))
+    .map((l: string) => clean(l)) // ✅ TS fix here
     .filter(Boolean);
 
   // Find the LAST line containing "City, ST"
-  // (Last is safer if there are other comma-state fragments earlier.)
   const re = /\b([A-Za-z][A-Za-z .'-]{1,60}),\s*([A-Z]{2})\b/;
 
   for (let i = lines.length - 1; i >= 0; i--) {
