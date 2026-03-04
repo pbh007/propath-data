@@ -45,6 +45,10 @@ const MASTER_MINI = path.join(DATA_DIR, "ProPath-MiniTour2026-MasterEvents.csv")
 // we assume it failed and DO NOT overwrite that tour’s upcoming block.
 const MIN_ROWS_TO_TRUST_PER_TOUR = 5;
 
+// Junk filters (these are the “bad rows” you don’t want living in master)
+const JUNK_TITLE_RE = /^\s*event\s*info\s*$/i;
+const JUNK_ID_RE = /-event-info-/i;
+
 /* ----------------------------
    Helpers
 ---------------------------- */
@@ -120,6 +124,48 @@ function keyTour(t?: string) {
   return (t || "").trim().toLowerCase();
 }
 
+/**
+ * Decide if a row is junk / unsafe to keep.
+ * This will clean BOTH:
+ * - existing master (fixes current junk next run)
+ * - incoming files (prevents reintroducing junk)
+ */
+function isJunkRow(e: ProPathEvent): boolean {
+  const id = (e.id || "").trim();
+  const title = (e.title || "").trim();
+  const tour = (e.tour || "").trim();
+  const start = (e.start || "").toString().trim();
+
+  // Required fields (if missing, treat as junk)
+  if (!tour) return true;
+  if (!title) return true;
+  if (!start) return true;
+
+  // Explicit junk patterns you flagged
+  if (JUNK_TITLE_RE.test(title)) return true;
+  if (JUNK_ID_RE.test(id)) return true;
+
+  // Common garbage
+  if (/^register$/i.test(title)) return true;
+
+  return false;
+}
+
+function cleanEvents(rows: ProPathEvent[]): ProPathEvent[] {
+  return rows
+    .map((r) => {
+      // normalize “nullish” strings
+      const start = (r.start ?? "").toString().trim();
+      const end = (r.end ?? "").toString().trim();
+      return {
+        ...r,
+        start: start ? start : null,
+        end: end ? end : null,
+      };
+    })
+    .filter((r) => !isJunkRow(r));
+}
+
 function dedupeAndSort(rows: ProPathEvent[]) {
   const map = new Map<string, ProPathEvent>();
 
@@ -143,7 +189,9 @@ function dedupeAndSort(rows: ProPathEvent[]) {
  * Replace UPCOMING rows for each tour found in incoming.
  * - Keeps PAST rows for that tour.
  * - Leaves all other tours untouched.
- * - Safety: only overwrites a tour if incoming has >= MIN_ROWS_TO_TRUST_PER_TOUR rows.
+ * - Safety:
+ *    - incoming must have >= MIN_ROWS_TO_TRUST_PER_TOUR rows
+ *    - AND must include at least 1 UPCOMING valid row
  */
 function mergeMasterWithIncoming(master: ProPathEvent[], incoming: ProPathEvent[]) {
   const incomingByTour = new Map<string, ProPathEvent[]>();
@@ -159,25 +207,36 @@ function mergeMasterWithIncoming(master: ProPathEvent[], incoming: ProPathEvent[
 
   let out = [...master];
 
-  for (const [tourKey, rows] of incomingByTour.entries()) {
+  for (const [tourKey, rawRows] of incomingByTour.entries()) {
+    const rows = cleanEvents(rawRows);
     const count = rows.length;
+
+    const upcomingCount = rows.filter((r) => isUpcoming(r.start)).length;
 
     // Safety: skip if looks like a failed scrape
     if (count < MIN_ROWS_TO_TRUST_PER_TOUR) {
       console.log(
-        `Skipping overwrite for tour "${tourKey}" (only ${count} incoming rows; min=${MIN_ROWS_TO_TRUST_PER_TOUR}).`
+        `Skipping overwrite for tour "${tourKey}" (only ${count} clean incoming rows; min=${MIN_ROWS_TO_TRUST_PER_TOUR}).`
       );
       continue;
     }
 
-    // Remove UPCOMING master rows for this tourKey
+    // Safety: do not overwrite if there are ZERO upcoming rows
+    if (upcomingCount === 0) {
+      console.log(
+        `Skipping overwrite for tour "${tourKey}" (0 upcoming rows in incoming; would risk deleting upcoming master rows).`
+      );
+      continue;
+    }
+
+    // Remove UPCOMING master rows for this tourKey (keep past)
     out = out.filter((m) => {
       const sameTour = keyTour(m.tour) === tourKey;
       if (!sameTour) return true;
       return !isUpcoming(m.start); // keep past
     });
 
-    // Add incoming (assumed to be authoritative upcoming)
+    // Add incoming (authoritative upcoming)
     out.push(...rows);
   }
 
@@ -200,8 +259,11 @@ async function runSource(s: Source): Promise<boolean> {
     events = await runHtmlBlocks(s as any);
   }
 
+  // Clean before writing incoming file (prevents junk from being produced)
+  events = cleanEvents(events);
+
   if (!events.length) {
-    console.log(`No rows for source "${s.id}"`);
+    console.log(`No clean rows for source "${s.id}"`);
     return false;
   }
 
@@ -214,7 +276,8 @@ async function runSource(s: Source): Promise<boolean> {
    Merge step
 ---------------------------- */
 function mergeIncomingIntoMiniMaster() {
-  const existing = parseCsvToEvents(safeRead(MASTER_MINI));
+  // Clean existing master too (this is what fixes your CURRENT junk rows)
+  const existing = cleanEvents(parseCsvToEvents(safeRead(MASTER_MINI)));
 
   const incomingFiles = fs.existsSync(DATA_DIR)
     ? fs
@@ -227,7 +290,7 @@ function mergeIncomingIntoMiniMaster() {
   for (const f of incomingFiles) {
     const full = path.join(DATA_DIR, f);
     const csv = safeRead(full);
-    const events = parseCsvToEvents(csv);
+    const events = cleanEvents(parseCsvToEvents(csv));
     incomingAll.push(...events);
   }
 
@@ -237,7 +300,7 @@ function mergeIncomingIntoMiniMaster() {
   }
 
   const merged = mergeMasterWithIncoming(existing, incomingAll);
-  const finalRows = dedupeAndSort(merged);
+  const finalRows = dedupeAndSort(cleanEvents(merged));
 
   writeEventsCsv("data/ProPath-MiniTour2026-MasterEvents.csv", finalRows as any);
   console.log(`✅ Master updated: ${finalRows.length} rows`);
