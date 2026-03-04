@@ -8,6 +8,7 @@ import { coerceISO } from "./lib/normalize.js";
 import { runJsonApi } from "./connectors/json_api.js";
 import { runHtmlTable } from "./connectors/html_table.js";
 import { runHtmlBlocks } from "./connectors/html_blocks.js";
+import { runHtmlCards } from "./connectors/html_cards.js";
 
 type ProPathEvent = {
   id?: string;
@@ -29,11 +30,17 @@ type ProPathEvent = {
 type Source = {
   id: string;
   name: string;
-  connector: "json_api" | "html_table" | "html_blocks";
+  connector: "json_api" | "html_table" | "html_blocks" | "html_cards";
   url: string;
   output: string;
   defaults?: Record<string, string>;
   tableSelector?: string;
+  cardSelector?: string;
+  minValidRows?: number;
+
+  // Optional policy: if omitted, we treat BlueGolf as link-only and skip scraping.
+  // If later you get permission, set policy:"allow" for that source.
+  policy?: "allow" | "deny" | "link_only";
 };
 
 /* ----------------------------
@@ -42,7 +49,11 @@ type Source = {
 const DATA_DIR = path.resolve("data");
 const MASTER_MINI = path.join(DATA_DIR, "ProPath-MiniTour2026-MasterEvents.csv");
 
+// Default safety threshold (can be overridden per tour via sources.json minValidRows)
 const MIN_VALID_ROWS_TO_TRUST_PER_TOUR = 5;
+
+// Built at runtime from sources.json: tourKey -> minValidRows
+const TOUR_MIN_ROWS = new Map<string, number>();
 
 /* ----------------------------
    Utilities
@@ -109,11 +120,8 @@ function isEventInfoPlaceholder(e: ProPathEvent): boolean {
   const stage = (e.stage || "").trim().toLowerCase();
   const signup = (e.signupUrl || "").trim().toLowerCase();
 
-  const typeLooksPlaceholder =
-    type === "" || type === "training division";
-
+  const typeLooksPlaceholder = type === "" || type === "training division";
   const stageEmpty = stage === "";
-
   const hasEventId = signup.includes("event_id=");
 
   return typeLooksPlaceholder && stageEmpty && hasEventId;
@@ -205,14 +213,14 @@ function mergeMasterWithIncoming(master: ProPathEvent[], incoming: ProPathEvent[
 
   for (const [tourKey, rows] of incomingByTour.entries()) {
     const validCount = countValidRows(rows);
+    const minRows = TOUR_MIN_ROWS.get(tourKey) ?? MIN_VALID_ROWS_TO_TRUST_PER_TOUR;
 
-    if (validCount < MIN_VALID_ROWS_TO_TRUST_PER_TOUR) {
-      console.log(
-        `Skipping overwrite for tour "${tourKey}" (only ${validCount} valid rows)`
-      );
+    if (validCount < minRows) {
+      console.log(`Skipping overwrite for tour "${tourKey}" (only ${validCount} valid rows; min=${minRows})`);
       continue;
     }
 
+    // Remove upcoming events for that tour, keep past events
     out = out.filter((m) => {
       const sameTour = keyTour(m.tour) === tourKey;
       if (!sameTour) return true;
@@ -231,6 +239,17 @@ function mergeMasterWithIncoming(master: ProPathEvent[], incoming: ProPathEvent[
 async function runSource(s: Source): Promise<boolean> {
   if (!s.url || s.url.includes("PASTE_URL_HERE")) return false;
 
+  // Safety: Treat BlueGolf as link-only by default unless explicitly allowed
+  try {
+    const host = new URL(s.url).hostname.toLowerCase();
+    if (host.includes("bluegolf.com") && s.policy !== "allow") {
+      console.log(`Skipping source "${s.id}" (BlueGolf link-only policy)`);
+      return false;
+    }
+  } catch {
+    // ignore URL parsing failures here
+  }
+
   let events: ProPathEvent[] = [];
 
   if (s.connector === "json_api") {
@@ -239,6 +258,8 @@ async function runSource(s: Source): Promise<boolean> {
     events = await runHtmlTable(s as any);
   } else if (s.connector === "html_blocks") {
     events = await runHtmlBlocks(s as any);
+  } else if (s.connector === "html_cards") {
+    events = await runHtmlCards(s as any);
   }
 
   if (!events.length) {
@@ -299,6 +320,18 @@ function mergeIncomingIntoMiniMaster() {
 async function main() {
   const sourcesPath = path.resolve("data", "sources.json");
   const sources = JSON.parse(fs.readFileSync(sourcesPath, "utf8")) as Source[];
+
+  // Build per-tour minValidRows map
+  TOUR_MIN_ROWS.clear();
+  for (const s of sources) {
+    const tourName = (s.defaults?.tour || "").toString().trim();
+    if (!tourName) continue;
+    const tk = keyTour(tourName);
+    if (!tk) continue;
+    if (typeof s.minValidRows === "number" && Number.isFinite(s.minValidRows)) {
+      TOUR_MIN_ROWS.set(tk, s.minValidRows);
+    }
+  }
 
   for (const s of sources) {
     await runSource(s);
