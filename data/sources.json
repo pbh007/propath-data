@@ -5,21 +5,18 @@
     "connector": "html_blocks",
     "url": "https://www.minorleaguegolf.com/index_events.asp",
     "output": "data/_incoming_mlgt_upcoming.csv",
-    "defaults": {
-      "tour": "Minor League Golf Tour",
-      "gender": "Men"
-    }
+    "defaults": { "tour": "Minor League Golf Tour", "gender": "Men" },
+    "mergeMode": "replace_upcoming",
+    "minValidRows": 5
   },
   {
-    "id": "gpro_upcoming",
-    "name": "GPro Tour",
+    "id": "gpro_upcoming_cards",
+    "name": "GPro Tour (Upcoming Cards)",
     "connector": "html_cards",
     "url": "https://thegprotour.com/pro/programs/gprotour/index.html",
     "output": "data/_incoming_gpro.csv",
-    "defaults": {
-      "tour": "GPro Tour",
-      "type": "Event"
-    }
+    "defaults": { "tour": "GPro Tour", "type": "Event", "gender": "Men" },
+    "mergeMode": "patch_only",
+    "minValidRows": 1
   }
 ]
-
