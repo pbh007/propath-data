@@ -10,20 +10,29 @@ import { runHtmlTable } from "./connectors/html_table.js";
 import { runHtmlBlocks } from "./connectors/html_blocks.js";
 import { runHtmlCards } from "./connectors/html_cards.js";
 
+/**
+ * IMPORTANT:
+ * Your scrapers pipeline has strict TS settings, so we allow nulls in the event shape.
+ * We normalize aggressively to keep stored CSV values consistent.
+ */
 type ProPathEvent = {
-  id?: string;
-  tour?: string;
-  gender?: string;
-  type?: string;
-  stage?: string;
-  title?: string;
+  id?: string | null;
+  tour?: string | null;
+  gender?: string | null;
+  type?: string | null;
+  stage?: string | null;
+  title?: string | null;
+
   start?: string | null;
   end?: string | null;
-  city?: string;
-  state_country?: string;
-  tourUrl?: string;
-  signupUrl?: string;
-  mondayUrl?: string;
+
+  city?: string | null;
+  state_country?: string | null;
+
+  tourUrl?: string | null;
+  signupUrl?: string | null;
+
+  mondayUrl?: string | null;
   mondayDate?: string | null;
 };
 
@@ -42,6 +51,7 @@ type Source = {
   minValidRows?: number;
   mergeMode?: MergeMode;
 
+  // Default policy: BlueGolf is link-only unless explicitly "allow"
   policy?: "allow" | "deny" | "link_only";
 };
 
@@ -51,7 +61,6 @@ type Source = {
 const DATA_DIR = path.resolve("data");
 const MASTER_MINI = path.join(DATA_DIR, "ProPath-MiniTour2026-MasterEvents.csv");
 
-// Defaults (per-tour overrides via sources.json)
 const MIN_VALID_ROWS_TO_TRUST_PER_TOUR = 5;
 
 // runtime maps from sources.json
@@ -76,14 +85,21 @@ function slug(s: string) {
 }
 
 function makeStableId(e: ProPathEvent): string {
-  return [
-    slug(e.tour || "unknown-tour"),
-    (e.start || "tbd").slice(0, 10),
-    slug(e.title || "event"),
-    slug(e.city || ""),
-  ]
-    .filter(Boolean)
-    .join("-");
+  const tour = (e.tour ?? "unknown-tour") || "unknown-tour";
+  const start = ((e.start ?? "tbd") || "tbd").slice(0, 10);
+  const title = (e.title ?? "event") || "event";
+  const city = (e.city ?? "") || "";
+
+  return [slug(tour), start, slug(title), slug(city)].filter(Boolean).join("-");
+}
+
+function keyTour(t?: string | null) {
+  return (t || "").trim().toLowerCase();
+}
+
+function nonEmpty(v?: string | null) {
+  const s = (v ?? "").toString().trim();
+  return s ? s : "";
 }
 
 function normalizeRow(r: any): ProPathEvent {
@@ -92,28 +108,28 @@ function normalizeRow(r: any): ProPathEvent {
   const mondayISO = coerceISO(r.mondayDate ?? null);
 
   const out: ProPathEvent = {
-    id: (r.id ?? "").toString().trim() || undefined,
-    tour: (r.tour ?? "").toString().trim() || undefined,
-    gender: (r.gender ?? "").toString().trim() || undefined,
-    type: (r.type ?? "").toString().trim() || undefined,
-    stage: (r.stage ?? "").toString().trim() || undefined,
-    title: (r.title ?? "").toString().trim() || undefined,
-    start: startISO,
-    end: endISO,
-    city: (r.city ?? "").toString().trim() || undefined,
-    state_country: (r.state_country ?? "").toString().trim() || undefined,
-    tourUrl: (r.tourUrl ?? "").toString().trim() || undefined,
-    signupUrl: (r.signupUrl ?? "").toString().trim() || undefined,
-    mondayUrl: (r.mondayUrl ?? "").toString().trim() || undefined,
-    mondayDate: mondayISO,
+    id: nonEmpty(r.id) || null,
+    tour: nonEmpty(r.tour) || null,
+    gender: nonEmpty(r.gender) || null,
+    type: nonEmpty(r.type) || null,
+    stage: nonEmpty(r.stage) || null,
+    title: nonEmpty(r.title) || null,
+
+    start: startISO ?? null,
+    end: endISO ?? null,
+
+    city: nonEmpty(r.city) || null,
+    state_country: nonEmpty(r.state_country) || null,
+
+    tourUrl: nonEmpty(r.tourUrl) || null,
+    signupUrl: nonEmpty(r.signupUrl) || null,
+
+    mondayUrl: nonEmpty(r.mondayUrl) || null,
+    mondayDate: mondayISO ?? null,
   };
 
   if (!out.id) out.id = makeStableId(out);
   return out;
-}
-
-function keyTour(t?: string) {
-  return (t || "").trim().toLowerCase();
 }
 
 /* ----------------------------
@@ -179,15 +195,15 @@ function dedupeAndSort(rows: ProPathEvent[]) {
   const map = new Map<string, ProPathEvent>();
 
   for (const r of rows) {
-    const id = (r.id || makeStableId(r)).trim();
+    const id = (r.id || makeStableId(r)).toString().trim();
     map.set(id, { ...r, id });
   }
 
   const out = Array.from(map.values());
 
   out.sort((a, b) => {
-    const as = (a.start || "9999-12-31").slice(0, 10);
-    const bs = (b.start || "9999-12-31").slice(0, 10);
+    const as = ((a.start || "9999-12-31") as string).slice(0, 10);
+    const bs = ((b.start || "9999-12-31") as string).slice(0, 10);
     return as.localeCompare(bs);
   });
 
@@ -198,40 +214,40 @@ function dedupeAndSort(rows: ProPathEvent[]) {
    Patch helpers
 ---------------------------- */
 function patchEvent(existing: ProPathEvent, incoming: ProPathEvent): ProPathEvent {
-  // PATCH POLICY:
-  // - Never blank out existing fields with empty incoming values.
-  // - Prefer incoming for URLs (signupUrl/tourUrl) because those change.
-  // - Keep existing title/start as identity; allow end/city/state updates if provided.
-  const pick = (a?: string | null, b?: string | null) => (b && String(b).trim() ? b : a);
+  const pick = (a?: string | null, b?: string | null) => {
+    const bb = nonEmpty(b);
+    if (bb) return bb;
+    const aa = nonEmpty(a);
+    return aa ? aa : null;
+  };
 
   return {
     ...existing,
-    // Keep id stable
     id: existing.id || incoming.id || makeStableId(existing),
 
-    // Identity fields: keep existing if incoming is empty
-    title: pick(existing.title, incoming.title),
-    start: pick(existing.start, incoming.start),
-    type: pick(existing.type, incoming.type),
     tour: pick(existing.tour, incoming.tour),
+    title: pick(existing.title, incoming.title),
+    type: pick(existing.type, incoming.type),
+    stage: pick(existing.stage, incoming.stage),
+    gender: pick(existing.gender, incoming.gender),
 
-    // Patchable “facts”
+    start: pick(existing.start, incoming.start),
     end: pick(existing.end, incoming.end),
+
     city: pick(existing.city, incoming.city),
     state_country: pick(existing.state_country, incoming.state_country),
 
-    // Patch URLs aggressively (but never blank them)
+    // Patch URLs (never erase)
     signupUrl: pick(existing.signupUrl, incoming.signupUrl),
     tourUrl: pick(existing.tourUrl, incoming.tourUrl),
 
-    // Mondays (if you later add them)
     mondayUrl: pick(existing.mondayUrl, incoming.mondayUrl),
-    mondayDate: pick(existing.mondayDate as any, incoming.mondayDate as any) as any,
+    mondayDate: pick(existing.mondayDate, incoming.mondayDate),
   };
 }
 
 function matchKey(e: ProPathEvent) {
-  // A stable match key independent of id changes:
+  // Stable match key independent of id changes:
   // tour + start date + normalized title
   const t = keyTour(e.tour);
   const s = (e.start || "").slice(0, 10);
@@ -264,8 +280,6 @@ function mergeMasterWithIncoming(master: ProPathEvent[], incoming: ProPathEvent[
     const minRows = TOUR_MIN_ROWS.get(tourKey) ?? MIN_VALID_ROWS_TO_TRUST_PER_TOUR;
     const mode = TOUR_MERGE_MODE.get(tourKey) ?? "replace_upcoming";
 
-    // Always enforce a minimum valid row check (even for patch mode),
-    // but allow low numbers via per-tour override in sources.json.
     if (validCount < minRows) {
       console.log(
         `Skipping merge for tour "${tourKey}" (only ${validCount} valid rows; min=${minRows}; mode=${mode})`
@@ -281,6 +295,7 @@ function mergeMasterWithIncoming(master: ProPathEvent[], incoming: ProPathEvent[
     if (mode === "patch_only") {
       // Patch existing matching events; append if not found.
       const indexByKey = new Map<string, number>();
+
       for (let i = 0; i < out.length; i++) {
         const e = out[i];
         if (keyTour(e.tour) !== tourKey) continue;
@@ -349,9 +364,7 @@ async function runSource(s: Source): Promise<boolean> {
     return false;
   }
 
-  const cleaned = events
-    .map((e: any) => normalizeRow(e))
-    .filter((e) => !isEventInfoPlaceholder(e));
+  const cleaned = events.map((e: any) => normalizeRow(e)).filter((e) => !isEventInfoPlaceholder(e));
 
   if (!cleaned.length) {
     console.log(`All rows filtered for source "${s.id}"`);
@@ -370,9 +383,7 @@ function mergeIncomingIntoMiniMaster() {
   const existing = parseCsvToEvents(safeRead(MASTER_MINI));
 
   const incomingFiles = fs.existsSync(DATA_DIR)
-    ? fs
-        .readdirSync(DATA_DIR)
-        .filter((f) => f.startsWith("_incoming_") && f.endsWith(".csv"))
+    ? fs.readdirSync(DATA_DIR).filter((f) => f.startsWith("_incoming_") && f.endsWith(".csv"))
     : [];
 
   const incomingAll: ProPathEvent[] = [];
@@ -414,18 +425,16 @@ async function main() {
     const tk = keyTour(tourName);
     if (!tk) continue;
 
-    // minValidRows override
     if (typeof s.minValidRows === "number" && Number.isFinite(s.minValidRows)) {
       TOUR_MIN_ROWS.set(tk, s.minValidRows);
     }
 
-    // mergeMode: if multiple sources set modes for same tour,
-    // prefer the most conservative: patch_only > replace_upcoming > append_only
-    const current = TOUR_MERGE_MODE.get(tk);
     const next = (s.mergeMode || "replace_upcoming") as MergeMode;
 
-    const rank = (m: MergeMode) =>
-      m === "patch_only" ? 3 : m === "replace_upcoming" ? 2 : 1;
+    // Prefer safer mode if multiple sources exist for same tour:
+    // patch_only (best) > replace_upcoming > append_only
+    const current = TOUR_MERGE_MODE.get(tk);
+    const rank = (m: MergeMode) => (m === "patch_only" ? 3 : m === "replace_upcoming" ? 2 : 1);
 
     if (!current || rank(next) > rank(current)) {
       TOUR_MERGE_MODE.set(tk, next);
