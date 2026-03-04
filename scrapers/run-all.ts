@@ -31,7 +31,7 @@ type Source = {
   name: string;
   connector: "json_api" | "html_table" | "html_blocks";
   url: string;
-  output: string; // should be data/_incoming_<something>.csv
+  output: string;
   defaults?: Record<string, string>;
   tableSelector?: string;
 };
@@ -42,15 +42,10 @@ type Source = {
 const DATA_DIR = path.resolve("data");
 const MASTER_MINI = path.join(DATA_DIR, "ProPath-MiniTour2026-MasterEvents.csv");
 
-// Safety guard: if a scrape returns too few "valid" rows for a tour,
-// we assume it failed and DO NOT overwrite that tour’s upcoming block.
 const MIN_VALID_ROWS_TO_TRUST_PER_TOUR = 5;
 
-// Optional: treat "Event Info" placeholder rows as junk and never keep them
-const DROP_EVENT_INFO_PLACEHOLDERS = true;
-
 /* ----------------------------
-   Helpers
+   Utilities
 ---------------------------- */
 function safeRead(filePath: string): string {
   if (!fs.existsSync(filePath)) return "";
@@ -77,14 +72,9 @@ function makeStableId(e: ProPathEvent): string {
     .join("-");
 }
 
-function isEventInfoPlaceholder(e: ProPathEvent): boolean {
-  const t = (e.title || "").trim().toLowerCase();
-  return t === "event info";
-}
-
 function normalizeRow(r: any): ProPathEvent {
   const startISO = coerceISO(r.start ?? null);
-  const endISO = coerceISO(r.end ?? null);
+  const endISO = coerceISO(r.end ?? null) ?? startISO;
   const mondayISO = coerceISO(r.mondayDate ?? null);
 
   const out: ProPathEvent = {
@@ -95,7 +85,7 @@ function normalizeRow(r: any): ProPathEvent {
     stage: (r.stage ?? "").toString().trim() || undefined,
     title: (r.title ?? "").toString().trim() || undefined,
     start: startISO,
-    end: endISO ?? startISO,
+    end: endISO,
     city: (r.city ?? "").toString().trim() || undefined,
     state_country: (r.state_country ?? "").toString().trim() || undefined,
     tourUrl: (r.tourUrl ?? "").toString().trim() || undefined,
@@ -108,6 +98,30 @@ function normalizeRow(r: any): ProPathEvent {
   return out;
 }
 
+/* ----------------------------
+   Placeholder Detection (SAFE)
+---------------------------- */
+function isEventInfoPlaceholder(e: ProPathEvent): boolean {
+  const title = (e.title || "").trim().toLowerCase();
+  if (title !== "event info") return false;
+
+  const type = (e.type || "").trim().toLowerCase();
+  const stage = (e.stage || "").trim().toLowerCase();
+  const signup = (e.signupUrl || "").trim().toLowerCase();
+
+  const typeLooksPlaceholder =
+    type === "" || type === "training division";
+
+  const stageEmpty = stage === "";
+
+  const hasEventId = signup.includes("event_id=");
+
+  return typeLooksPlaceholder && stageEmpty && hasEventId;
+}
+
+/* ----------------------------
+   Parsing
+---------------------------- */
 function parseCsvToEvents(csvText: string): ProPathEvent[] {
   if (!csvText.trim()) return [];
   const parsed = Papa.parse(csvText, { header: true, skipEmptyLines: "greedy" });
@@ -115,6 +129,9 @@ function parseCsvToEvents(csvText: string): ProPathEvent[] {
   return rows.map(normalizeRow);
 }
 
+/* ----------------------------
+   Date helpers
+---------------------------- */
 function todayISO(): string {
   const d = new Date();
   const y = d.getFullYear();
@@ -125,7 +142,7 @@ function todayISO(): string {
 
 function isUpcoming(start?: string | null): boolean {
   const s = (start || "").slice(0, 10);
-  if (!s) return true; // unknown date => treat as upcoming
+  if (!s) return true;
   return s >= todayISO();
 }
 
@@ -133,6 +150,20 @@ function keyTour(t?: string) {
   return (t || "").trim().toLowerCase();
 }
 
+/* ----------------------------
+   Validation
+---------------------------- */
+function countValidRows(rows: ProPathEvent[]) {
+  return rows.filter((r) => {
+    if (!r.tour || !r.title || !r.start) return false;
+    if (isEventInfoPlaceholder(r)) return false;
+    return true;
+  }).length;
+}
+
+/* ----------------------------
+   Dedupe + Sort
+---------------------------- */
 function dedupeAndSort(rows: ProPathEvent[]) {
   const map = new Map<string, ProPathEvent>();
 
@@ -152,32 +183,17 @@ function dedupeAndSort(rows: ProPathEvent[]) {
   return out;
 }
 
-function countValidRows(rows: ProPathEvent[]) {
-  // "valid" = has tour + title + start ISO
-  return rows.filter((r) => {
-    const tourOk = !!keyTour(r.tour);
-    const titleOk = !!(r.title || "").trim();
-    const startOk = !!(r.start || "").trim();
-    if (!tourOk || !titleOk || !startOk) return false;
-    if (DROP_EVENT_INFO_PLACEHOLDERS && isEventInfoPlaceholder(r)) return false;
-    return true;
-  }).length;
-}
-
-/**
- * Replace UPCOMING rows for each tour found in incoming.
- * - Keeps PAST rows for that tour.
- * - Leaves all other tours untouched.
- * - Safety: only overwrites a tour if incoming has >= MIN_VALID_ROWS_TO_TRUST_PER_TOUR "valid" rows.
- */
+/* ----------------------------
+   Merge Logic (SAFE)
+---------------------------- */
 function mergeMasterWithIncoming(master: ProPathEvent[], incoming: ProPathEvent[]) {
   const incomingByTour = new Map<string, ProPathEvent[]>();
 
   for (const r of incoming) {
+    if (isEventInfoPlaceholder(r)) continue;
+
     const tourKey = keyTour(r.tour);
     if (!tourKey) continue;
-
-    if (DROP_EVENT_INFO_PLACEHOLDERS && isEventInfoPlaceholder(r)) continue;
 
     if (!incomingByTour.has(tourKey)) incomingByTour.set(tourKey, []);
     incomingByTour.get(tourKey)!.push(r);
@@ -185,29 +201,24 @@ function mergeMasterWithIncoming(master: ProPathEvent[], incoming: ProPathEvent[
 
   if (incomingByTour.size === 0) return master;
 
-  let out = DROP_EVENT_INFO_PLACEHOLDERS
-    ? master.filter((m) => !isEventInfoPlaceholder(m))
-    : [...master];
+  let out = master.filter((m) => !isEventInfoPlaceholder(m));
 
   for (const [tourKey, rows] of incomingByTour.entries()) {
     const validCount = countValidRows(rows);
 
-    // Safety: skip if looks like a failed scrape
     if (validCount < MIN_VALID_ROWS_TO_TRUST_PER_TOUR) {
       console.log(
-        `Skipping overwrite for tour "${tourKey}" (only ${validCount} valid incoming rows; min=${MIN_VALID_ROWS_TO_TRUST_PER_TOUR}).`
+        `Skipping overwrite for tour "${tourKey}" (only ${validCount} valid rows)`
       );
       continue;
     }
 
-    // Remove UPCOMING master rows for this tourKey (keep past)
     out = out.filter((m) => {
       const sameTour = keyTour(m.tour) === tourKey;
       if (!sameTour) return true;
       return !isUpcoming(m.start);
     });
 
-    // Add incoming (assumed authoritative upcoming)
     out.push(...rows);
   }
 
@@ -215,7 +226,7 @@ function mergeMasterWithIncoming(master: ProPathEvent[], incoming: ProPathEvent[
 }
 
 /* ----------------------------
-   Running sources
+   Run Sources
 ---------------------------- */
 async function runSource(s: Source): Promise<boolean> {
   if (!s.url || s.url.includes("PASTE_URL_HERE")) return false;
@@ -235,10 +246,9 @@ async function runSource(s: Source): Promise<boolean> {
     return false;
   }
 
-  // Normalize/clean before writing incoming
   const cleaned = events
     .map((e: any) => normalizeRow(e))
-    .filter((e) => !DROP_EVENT_INFO_PLACEHOLDERS || !isEventInfoPlaceholder(e));
+    .filter((e) => !isEventInfoPlaceholder(e));
 
   if (!cleaned.length) {
     console.log(`All rows filtered for source "${s.id}"`);
@@ -251,7 +261,7 @@ async function runSource(s: Source): Promise<boolean> {
 }
 
 /* ----------------------------
-   Merge step
+   Merge Step
 ---------------------------- */
 function mergeIncomingIntoMiniMaster() {
   const existing = parseCsvToEvents(safeRead(MASTER_MINI));
