@@ -6,7 +6,9 @@
   "scripts": {
     "build:scrapers": "tsc -p tsconfig.scrapers.json",
     "scrape": "node dist-scrapers/run-all.js",
-    "detect": "tsx scrapers/detect.ts"
+
+    "detect": "tsx scrapers/detect.ts",
+    "find:schedule": "tsx scrapers/find-schedule.ts"
   },
   "dependencies": {
     "cheerio": "^1.0.0",
