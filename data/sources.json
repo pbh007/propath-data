@@ -19,7 +19,7 @@
     "mergeMode": "patch_only",
     "minValidRows": 1
   }
-  ,
+ ,
 {
   "id": "wfg_schedule",
   "name": "West Florida Golf Tour",
@@ -31,6 +31,6 @@
     "gender": "Men",
     "type": "Event"
   },
-  "blockSelector": ".eventRow"
+  "blockSelector": "tr"
 }
 ]
