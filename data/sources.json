@@ -5,7 +5,10 @@
     "connector": "html_blocks",
     "url": "https://www.minorleaguegolf.com/index_events.asp",
     "output": "data/_incoming_mlgt_upcoming.csv",
-    "defaults": { "tour": "Minor League Golf Tour", "gender": "Men" },
+    "defaults": {
+      "tour": "Minor League Golf Tour",
+      "gender": "Men"
+    },
     "mergeMode": "replace_upcoming",
     "minValidRows": 5
   },
@@ -15,22 +18,12 @@
     "connector": "html_cards",
     "url": "https://thegprotour.com/pro/programs/gprotour/index.html",
     "output": "data/_incoming_gpro.csv",
-    "defaults": { "tour": "GPro Tour", "type": "Event", "gender": "Men" },
+    "defaults": {
+      "tour": "GPro Tour",
+      "type": "Event",
+      "gender": "Men"
+    },
     "mergeMode": "patch_only",
     "minValidRows": 1
   }
- ,
-{
-  "id": "wfg_schedule",
-  "name": "West Florida Golf Tour",
-  "connector": "html_blocks",
-  "url": "https://www.westfloridagolftour.com/CommonPage.aspx?Parameter=WinterScheduleID&PageTitle=Winter%20Schedule",
-  "output": "data/_incoming_wfg.csv",
-  "defaults": {
-    "tour": "West Florida Golf Tour",
-    "gender": "Men",
-    "type": "Event"
-  },
-  "blockSelector": "tr"
-}
 ]
