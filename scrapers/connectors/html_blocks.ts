@@ -2,17 +2,12 @@ import * as cheerio from "cheerio";
 import type { ProPathEvent } from "../lib/types.js";
 import { coerceISO } from "../lib/normalize.js";
 
-
-
-
-
 type Source = {
   url: string;
   defaults?: Record<string, string>;
 };
 
 function addDays(iso: string, days: number) {
-  // Only accept YYYY-MM-DD
   if (!/^\d{4}-\d{2}-\d{2}$/.test(iso)) return iso;
 
   const d = new Date(`${iso}T00:00:00Z`);
@@ -22,9 +17,7 @@ function addDays(iso: string, days: number) {
   return d.toISOString().slice(0, 10);
 }
 
-
 function parseDayCount(text: string): number {
-  // examples: "1-Day $275", "2-Day $540", "3-Day $0"
   const m = text.match(/(\d+)\s*-\s*Day/i);
   const n = m ? Number(m[1]) : 1;
   return Number.isFinite(n) && n >= 1 ? n : 1;
@@ -38,14 +31,12 @@ function parseFee(text: string): string {
 export async function runHtmlBlocks(source: Source): Promise<ProPathEvent[]> {
   const res = await fetch(source.url, { headers: { "user-agent": "propath-bot" } });
   if (!res.ok) throw new Error(`html_blocks fetch failed: ${res.status} ${res.statusText}`);
+
   const html = await res.text();
   const $ = cheerio.load(html);
 
-  // The page uses a repeating pattern; easiest robust approach:
-  // Find headings that look like "Monday, February 16, 2026" and walk forward.
   const events: ProPathEvent[] = [];
 
-  // Pick elements that contain a day-of-week + year pattern
   const dateCandidates = $("h1,h2,h3,h4,h5,div,span,strong,b,td")
     .toArray()
     .filter((el) => {
@@ -58,13 +49,10 @@ export async function runHtmlBlocks(source: Source): Promise<ProPathEvent[]> {
     const start = coerceISO(dateText);
     if (!start) continue;
 
-    // Walk the DOM forward until the next date heading.
-    // We will read a small window of text and links to form one event.
     let cursor = $(dateEl).next();
     const windowText: string[] = [];
     const links: { text: string; href: string }[] = [];
 
-    // Collect a bounded chunk (prevents grabbing the whole page)
     for (let i = 0; i < 25 && cursor.length; i++) {
       const t = cursor.text().replace(/\s+/g, " ").trim();
       if (t) windowText.push(t);
@@ -72,103 +60,79 @@ export async function runHtmlBlocks(source: Source): Promise<ProPathEvent[]> {
       cursor.find("a").each((_, a) => {
         const txt = $(a).text().trim();
         const href = $(a).attr("href");
-        if (href) links.push({ text: txt, href: new URL(href, source.url).toString() });
+        if (href) {
+          try {
+            links.push({ text: txt, href: new URL(href, source.url).toString() });
+          } catch {
+            // ignore bad urls
+          }
+        }
       });
 
-      // stop if we hit another date heading-like element
       if (/(Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday),/.test(t) && /\b20\d{2}\b/.test(t)) break;
 
       cursor = cursor.next();
     }
 
-    // Heuristic extraction based on the known repeating pattern on this page:
-    // [Course name], [City, ST], [Event title], [X-Day $Fee ... (MLGT/TD)]
     const joined = windowText.join(" | ");
-
-    // Course is usually early; city/state is next line like "Stuart, FL"
     const cityStateMatch = joined.match(/([A-Za-z .'-]+,\s*[A-Z]{2})/);
     const state_country = cityStateMatch ? `${cityStateMatch[0]}, USA` : "";
 
-    // Event title: usually the thing with "Classic" / "Contest" etc.
-    // We can grab from the "Event Info" link if present (its anchor text is the title in your page)
-    // Find the "Event Info" link (we use it as an anchor to locate the row/block)
-const eventInfo = links.find((l) => /Event Info/i.test(l.text));
+    let title = "";
 
-// Title should NOT be the link text ("Event Info").
-// We need to pull a meaningful title from surrounding text.
-let title = "";
+    const joinedClean = windowText
+      .map((t) => t.replace(/\s+/g, " ").trim())
+      .filter(Boolean);
 
-// Heuristic 1: look for a likely event name line in the captured windowText.
-// (Usually NOT the city/state, NOT the fee line, NOT generic words.)
-const joinedClean = windowText
-  .map((t) => t.replace(/\s+/g, " ").trim())
-  .filter(Boolean);
+    const junk = (s: string) => {
+      const x = s.toLowerCase();
+      if (x === "event info") return true;
+      if (x === "register") return true;
+      if (/\d+\s*-\s*day\s*\$\s*[\d,]+/i.test(s)) return true;
+      if (/^[A-Za-z .'-]+,\s*[A-Z]{2}$/.test(s)) return true;
+      if (x.includes("minor league golf tour")) return true;
+      if (x.includes("training division")) return true;
+      return false;
+    };
 
-// remove obvious junk candidates
-const junk = (s: string) => {
-  const x = s.toLowerCase();
-  if (x === "event info") return true;
-  if (x === "register") return true;
-  if (/\d+\s*-\s*day\s*\$\s*[\d,]+/i.test(s)) return true;
-  if (/^[A-Za-z .'-]+,\s*[A-Z]{2}$/.test(s)) return true; // City, ST
-  if (x.includes("minor league golf tour")) return true;
-  if (x.includes("training division")) return true;
-  return false;
-};
+    const looksLikeTitle = (s: string) => {
+      const x = s.toLowerCase();
+      return (
+        s.length >= 6 &&
+        !junk(s) &&
+        (
+          x.includes("classic") ||
+          x.includes("open") ||
+          x.includes("championship") ||
+          x.includes("shootout") ||
+          x.includes("invitational") ||
+          x.includes("series") ||
+          x.includes("qualifier") ||
+          x.includes("club") ||
+          x.includes("cup")
+        )
+      );
+    };
 
-// prefer strings that look like real event names
-const looksLikeTitle = (s: string) => {
-  const x = s.toLowerCase();
-  return (
-    s.length >= 6 &&
-    !junk(s) &&
-    (
-      x.includes("classic") ||
-      x.includes("open") ||
-      x.includes("championship") ||
-      x.includes("shootout") ||
-      x.includes("invitational") ||
-      x.includes("series") ||
-      x.includes("qualifier") ||
-      x.includes("club") ||
-      x.includes("cup")
-    )
-  );
-};
+    title =
+      joinedClean.find(looksLikeTitle) ||
+      joinedClean.find((s) => !junk(s) && s.length >= 6) ||
+      "";
 
-title =
-  joinedClean.find(looksLikeTitle) ||
-  joinedClean.find((s) => !junk(s) && s.length >= 6) ||
-  "";
+    if (/^event info$/i.test(title)) title = "";
+    if (!title) continue;
 
-// Absolute fallback: if we *still* accidentally got "Event Info", blank it out.
-if (/^event info$/i.test(title)) title = "";
-
-// Only push if we have a usable title
-if (!title) continue;
-
-    // Fee / days: usually contains "1-Day $275" etc
     const feeMatch = joined.match(/\d+\s*-\s*Day\s*\$\s*[\d,]+/i);
     const feeText = feeMatch ? feeMatch[0] : "1-Day $0";
     const dayCount = parseDayCount(feeText);
-    const fee = parseFee(feeText);
+    parseFee(feeText); // kept available if you later want fee field
 
-    // End date = start + (dayCount-1)
     const end = dayCount > 1 ? addDays(start, dayCount - 1) : start;
 
-    // Register link is perfect for signupUrl
     const register = links.find((l) => /Register/i.test(l.text));
-
-    // Tour/type tags: MLGT vs TD appears in the block text; we map it to "type"
     const isTD = /(^|[^A-Z])TD([^A-Z]|$)/.test(joined);
     const type = isTD ? "Training Division" : "Event";
-
-    // Course name heuristic: the first chunk often is course name. Try to pull something usable.
-    // We'll set it as city field? No — better: set city as the city, and ignore course for now unless you add "location" field later.
     const city = cityStateMatch ? cityStateMatch[0].split(",")[0].trim() : "";
-
-    // Only push if we have a usable title
-    if (!title) continue;
 
     events.push({
       ...(source.defaults ?? {}),
@@ -184,12 +148,8 @@ if (!title) continue;
       mondayUrl: "",
       mondayDate: null
     });
-
-    // NOTE: This will create duplicates because the page has MLGT + TD for the same date/course.
-    // That’s OK — your app can filter by type, OR we can dedupe later if you want.
   }
 
-  // Basic dedupe by title+start+type
   const seen = new Set<string>();
   const deduped: ProPathEvent[] = [];
   for (const e of events) {
@@ -199,6 +159,10 @@ if (!title) continue;
     deduped.push(e);
   }
 
-  if (!deduped.length) throw new Error("html_blocks: 0 events parsed (selectors need adjustment)");
+  if (!deduped.length) {
+    console.warn(`html_blocks: 0 events parsed for ${source.url}`);
+    return [];
+  }
+
   return deduped;
 }
