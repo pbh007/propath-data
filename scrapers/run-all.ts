@@ -1,4 +1,3 @@
-// scrapers/run-all.ts
 import fs from "fs";
 import path from "path";
 import Papa from "papaparse";
@@ -10,11 +9,6 @@ import { runHtmlTable } from "./connectors/html_table.js";
 import { runHtmlBlocks } from "./connectors/html_blocks.js";
 import { runHtmlCards } from "./connectors/html_cards.js";
 
-/**
- * IMPORTANT:
- * Your scrapers pipeline has strict TS settings, so we allow nulls in the event shape.
- * We normalize aggressively to keep stored CSV values consistent.
- */
 type ProPathEvent = {
   id?: string | null;
   tour?: string | null;
@@ -47,29 +41,23 @@ type Source = {
   defaults?: Record<string, string>;
   tableSelector?: string;
   cardSelector?: string;
+  blockSelector?: string;
 
   minValidRows?: number;
   mergeMode?: MergeMode;
 
-  // Default policy: BlueGolf is link-only unless explicitly "allow"
   policy?: "allow" | "deny" | "link_only";
 };
 
-/* ----------------------------
-   Config
----------------------------- */
 const DATA_DIR = path.resolve("data");
 const MASTER_MINI = path.join(DATA_DIR, "ProPath-MiniTour2026-MasterEvents.csv");
 
+// Global default; override per-tour in sources.json
 const MIN_VALID_ROWS_TO_TRUST_PER_TOUR = 5;
 
-// runtime maps from sources.json
 const TOUR_MIN_ROWS = new Map<string, number>();
 const TOUR_MERGE_MODE = new Map<string, MergeMode>();
 
-/* ----------------------------
-   Utilities
----------------------------- */
 function safeRead(filePath: string): string {
   if (!fs.existsSync(filePath)) return "";
   return fs.readFileSync(filePath, "utf8");
@@ -132,9 +120,6 @@ function normalizeRow(r: any): ProPathEvent {
   return out;
 }
 
-/* ----------------------------
-   Placeholder Detection (SAFE)
----------------------------- */
 function isEventInfoPlaceholder(e: ProPathEvent): boolean {
   const title = (e.title || "").trim().toLowerCase();
   if (title !== "event info") return false;
@@ -150,9 +135,6 @@ function isEventInfoPlaceholder(e: ProPathEvent): boolean {
   return typeLooksPlaceholder && stageEmpty && hasEventId;
 }
 
-/* ----------------------------
-   Parsing
----------------------------- */
 function parseCsvToEvents(csvText: string): ProPathEvent[] {
   if (!csvText.trim()) return [];
   const parsed = Papa.parse(csvText, { header: true, skipEmptyLines: "greedy" });
@@ -160,9 +142,6 @@ function parseCsvToEvents(csvText: string): ProPathEvent[] {
   return rows.map(normalizeRow);
 }
 
-/* ----------------------------
-   Date helpers
----------------------------- */
 function todayISO(): string {
   const d = new Date();
   const y = d.getFullYear();
@@ -177,9 +156,6 @@ function isUpcoming(start?: string | null): boolean {
   return s >= todayISO();
 }
 
-/* ----------------------------
-   Validation
----------------------------- */
 function countValidRows(rows: ProPathEvent[]) {
   return rows.filter((r) => {
     if (!r.tour || !r.title || !r.start) return false;
@@ -188,9 +164,6 @@ function countValidRows(rows: ProPathEvent[]) {
   }).length;
 }
 
-/* ----------------------------
-   Dedupe + Sort
----------------------------- */
 function dedupeAndSort(rows: ProPathEvent[]) {
   const map = new Map<string, ProPathEvent>();
 
@@ -210,9 +183,6 @@ function dedupeAndSort(rows: ProPathEvent[]) {
   return out;
 }
 
-/* ----------------------------
-   Patch helpers
----------------------------- */
 function patchEvent(existing: ProPathEvent, incoming: ProPathEvent): ProPathEvent {
   const pick = (a?: string | null, b?: string | null) => {
     const bb = nonEmpty(b);
@@ -237,7 +207,6 @@ function patchEvent(existing: ProPathEvent, incoming: ProPathEvent): ProPathEven
     city: pick(existing.city, incoming.city),
     state_country: pick(existing.state_country, incoming.state_country),
 
-    // Patch URLs (never erase)
     signupUrl: pick(existing.signupUrl, incoming.signupUrl),
     tourUrl: pick(existing.tourUrl, incoming.tourUrl),
 
@@ -247,17 +216,12 @@ function patchEvent(existing: ProPathEvent, incoming: ProPathEvent): ProPathEven
 }
 
 function matchKey(e: ProPathEvent) {
-  // Stable match key independent of id changes:
-  // tour + start date + normalized title
   const t = keyTour(e.tour);
   const s = (e.start || "").slice(0, 10);
   const title = (e.title || "").trim().toLowerCase();
   return `${t}|${s}|${title}`;
 }
 
-/* ----------------------------
-   Merge Logic (SAFE + MODES)
----------------------------- */
 function mergeMasterWithIncoming(master: ProPathEvent[], incoming: ProPathEvent[]) {
   const incomingByTour = new Map<string, ProPathEvent[]>();
 
@@ -293,7 +257,6 @@ function mergeMasterWithIncoming(master: ProPathEvent[], incoming: ProPathEvent[
     }
 
     if (mode === "patch_only") {
-      // Patch existing matching events; append if not found.
       const indexByKey = new Map<string, number>();
 
       for (let i = 0; i < out.length; i++) {
@@ -316,8 +279,7 @@ function mergeMasterWithIncoming(master: ProPathEvent[], incoming: ProPathEvent[
       continue;
     }
 
-    // Default: replace_upcoming
-    // Remove upcoming events for that tour, keep past events
+    // replace_upcoming
     out = out.filter((m) => {
       const sameTour = keyTour(m.tour) === tourKey;
       if (!sameTour) return true;
@@ -330,13 +292,9 @@ function mergeMasterWithIncoming(master: ProPathEvent[], incoming: ProPathEvent[
   return out;
 }
 
-/* ----------------------------
-   Run Sources
----------------------------- */
 async function runSource(s: Source): Promise<boolean> {
   if (!s.url || s.url.includes("PASTE_URL_HERE")) return false;
 
-  // Safety: treat BlueGolf as link-only by default
   try {
     const host = new URL(s.url).hostname.toLowerCase();
     if (host.includes("bluegolf.com") && s.policy !== "allow") {
@@ -364,7 +322,9 @@ async function runSource(s: Source): Promise<boolean> {
     return false;
   }
 
-  const cleaned = events.map((e: any) => normalizeRow(e)).filter((e) => !isEventInfoPlaceholder(e));
+  const cleaned = events
+    .map((e: any) => normalizeRow(e))
+    .filter((e) => !isEventInfoPlaceholder(e));
 
   if (!cleaned.length) {
     console.log(`All rows filtered for source "${s.id}"`);
@@ -376,9 +336,6 @@ async function runSource(s: Source): Promise<boolean> {
   return true;
 }
 
-/* ----------------------------
-   Merge Step
----------------------------- */
 function mergeIncomingIntoMiniMaster() {
   const existing = parseCsvToEvents(safeRead(MASTER_MINI));
 
@@ -407,9 +364,6 @@ function mergeIncomingIntoMiniMaster() {
   console.log(`✅ Master updated: ${finalRows.length} rows`);
 }
 
-/* ----------------------------
-   Main
----------------------------- */
 async function main() {
   const sourcesPath = path.resolve("data", "sources.json");
   const sources = JSON.parse(fs.readFileSync(sourcesPath, "utf8")) as Source[];
@@ -417,7 +371,6 @@ async function main() {
   TOUR_MIN_ROWS.clear();
   TOUR_MERGE_MODE.clear();
 
-  // Build per-tour override maps from sources.json
   for (const s of sources) {
     const tourName = (s.defaults?.tour || "").toString().trim();
     if (!tourName) continue;
@@ -430,9 +383,6 @@ async function main() {
     }
 
     const next = (s.mergeMode || "replace_upcoming") as MergeMode;
-
-    // Prefer safer mode if multiple sources exist for same tour:
-    // patch_only (best) > replace_upcoming > append_only
     const current = TOUR_MERGE_MODE.get(tk);
     const rank = (m: MergeMode) => (m === "patch_only" ? 3 : m === "replace_upcoming" ? 2 : 1);
 
@@ -441,11 +391,26 @@ async function main() {
     }
   }
 
+  let successCount = 0;
+  let failureCount = 0;
+
   for (const s of sources) {
-    await runSource(s);
+    try {
+      const ok = await runSource(s);
+      if (ok) successCount++;
+    } catch (err) {
+      failureCount++;
+      console.error(`Source failed: ${s.id}`, err);
+    }
   }
 
   mergeIncomingIntoMiniMaster();
+
+  console.log(`Scrape complete. Successes: ${successCount}, Failures: ${failureCount}`);
+
+  if (successCount === 0) {
+    throw new Error("All sources failed; nothing was merged.");
+  }
 }
 
 main().catch((err) => {
